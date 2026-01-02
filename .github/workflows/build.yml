@@ -1,4 +1,4 @@
-name: Ultimate Final Fix (A-Z)
+name: Fixed Non-Jailbreak Build
 
 on:
   push:
@@ -12,17 +12,16 @@ jobs:
       - name: 1. Checkout Code
         uses: actions/checkout@v4
 
-      # حل مشكلة dm.pl: تثبيت الأدوات الضرورية يدوياً
-      - name: 2. Install System Tools (Fix dm.pl)
+      # 1) تثبيت الأدوات الضرورية فقط
+      - name: 2. Install Tools
         run: |
           brew update
-          brew install ldid dpkg make 
+          brew install ldid dpkg  # تثبيت dpkg كاحتياط لتجاوز أي فحص داخلي
 
-      # فك الضغط والبحث الذكي عن المشروع مهما كان اسمه
+      # 2) فك الضغط والبحث عن المشروع
       - name: 3. Smart Unzip & Locate
         run: |
           find . -name "*.zip" -exec unzip -o -q {} \;
-          # البحث عن أي ملف برمجي (cpp, mm, xm) لتحديد المجلد الصحيح
           SOURCE_FILE=$(find . -type f \( -name "*.xm" -o -name "*.mm" -o -name "*.cpp" -o -name "*.c" \) | head -n 1)
           if [ -z "$SOURCE_FILE" ]; then
             echo "::error::لم يتم العثور على سورس كود!"
@@ -30,68 +29,55 @@ jobs:
           fi
           PROJECT_DIR=$(dirname "$SOURCE_FILE")
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-          echo "✅ Found project in: $PROJECT_DIR"
 
-      # تحميل المكتبات المطلوبة (KittyMemory, fmt, Keystone)
-      - name: 4. Install Dependencies
+      # 3) إعداد Theos والمكتبات
+      - name: 4. Setup Theos & Dependencies
         run: |
+          git clone --recursive https://github.com/theos/theos.git ~/theos
+          git clone --depth=1 https://github.com/theos/sdks.git ~/theos/sdks
+          echo "THEOS=~/theos" >> $GITHUB_ENV
+          echo "~/theos/bin" >> $GITHUB_PATH
+          
           cd ${{ env.PROJECT_DIR }}
           mkdir -p deps
           git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
           git clone --depth=1 https://github.com/fmtlib/fmt.git deps/fmt
-          git clone --depth=1 https://github.com/keystone-engine/keystone.git deps/keystone
 
-      # إنشاء ملفات الإعداد لضمان نجاح البناء
-      - name: 5. Generate Makefile & Control
+      # 4) كتابة Makefile مخصص للحقن (بدون حزمة جلبريك)
+      - name: 5. Force New Makefile
         run: |
           cd ${{ env.PROJECT_DIR }}
-          rm -f Makefile control
-          
+          rm -f Makefile
           cat > Makefile <<EOF
           TARGET := iphone:clang:latest:14.0
           ARCHS = arm64
           include \$(THEOS)/makefiles/common.mk
           TWEAK_NAME = UEDumper
           UEDumper_FILES = \$(wildcard *.xm) \$(wildcard *.mm) \$(wildcard *.cpp) \$(wildcard src/*.cpp) \$(wildcard src/*.mm)
-          UEDumper_CCFLAGS = -std=c++17 -I"deps/KittyMemory" -I"deps/fmt/include" -I"deps/keystone/include" -DFMT_HEADER_ONLY
-          UEDumper_CFLAGS = -I"deps/KittyMemory" -I"deps/fmt/include" -I"deps/keystone/include"
+          UEDumper_CCFLAGS = -std=c++17 -I"deps/KittyMemory" -I"deps/fmt/include" -DFMT_HEADER_ONLY
+          UEDumper_CFLAGS = -I"deps/KittyMemory" -I"deps/fmt/include"
           include \$(THEOS_MAKE_PATH)/tweak.mk
           EOF
 
-          cat > control <<EOF
-          Package: com.uedumper.ios
-          Name: UEDumper
-          Version: 1.0
-          Architecture: iphoneos-arm
-          Description: UEDumper for Non-Jailbreak
-          Maintainer: Dev
-          Author: Dev
-          Section: Tweaks
-          EOF
-
-      - name: 6. Setup Theos
-        uses: actions/checkout@v4
-        with:
-          repository: theos/theos
-          path: theos
-          ref: master
-
-      # البناء النهائي واستخراج Dylib للحقن (بدون جلبريك)
-      - name: 7. Build & Extract Result
+      # 5) البناء المباشر (تجاوز خطأ dm.pl نهائياً)
+      - name: 6. Run Build
         run: |
-          export THEOS=$(pwd)/theos
+          export THEOS=~/theos
           cd ${{ env.PROJECT_DIR }}
-          make clean
-          make package FINALPACKAGE=1 messages=yes
-          
-          mkdir -p ../FINAL_OUT
-          # استخراج ملف dylib الصافي للحقن اليدوي
-          find .theos/obj -name "*.dylib" -exec cp {} ../FINAL_OUT/UEDumper_Injection.dylib \;
-          # نسخ ملف DEB كاحتياط
-          cp packages/*.deb ../FINAL_OUT/ 2>/dev/null || true
+          # السر هنا: نستخدم make فقط وليس make package
+          # هذا سيقوم بالترجمة فقط وينتج ملف dylib
+          make FINALPACKAGE=1 messages=yes
 
-      - name: 8. Upload Result
+      # 6) استخراج الملف الناتج للتحميل
+      - name: 7. Extract & Upload
+        run: |
+          mkdir -p final_output
+          # البحث عن ملف الـ dylib في مجلدات البناء ونسخه
+          find .theos/obj -name "*.dylib" -exec cp {} final_output/UEDumper_Ready.dylib \;
+          ls -la final_output
+      
+      - name: 8. Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: UEDumper_Ready_To_Inject
-          path: FINAL_OUT/*
+          name: UEDumper_NonJailbreak_Dylib
+          path: final_output/UEDumper_Ready.dylib
