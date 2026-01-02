@@ -1,0 +1,43 @@
+name: Debug Build UEDumper
+
+on:
+  workflow_dispatch:
+
+jobs:
+  debug-build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Unzip and LIST FILES (Debug Step)
+        run: |
+          echo ">>> Unzipping..."
+          unzip iOS_UEDumper-main.zip
+          
+          echo ">>> SHOWING FILE STRUCTURE (ابحث عن Makefile هنا):"
+          # هذا الأمر سيعرض كل الملفات والمجلدات لنعرف المسار الصحيح
+          find . -maxdepth 3 -not -path '*/.*'
+
+      - name: Setup Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          path: theos
+          ref: master
+
+      - name: Build with Verbose Logs
+        run: |
+          export THEOS=$(pwd)/theos
+          
+          # ملاحظة: إذا أظهرت الخطوة السابقة أن المجلد اسمه مختلف، عدل هذا السطر
+          cd iOS_UEDumper-main
+          
+          echo ">>> Checking if Makefile exists here..."
+          ls -la Makefile
+          
+          echo ">>> Starting Build with FULL LOGS..."
+          # messages=yes: يظهر تفاصيل الخطأ البرمجي
+          # debug=0: بما أنك تريده بدون جلبريك يفضل عدم تفعيل وضع الديباج الخاص بالمطورين لتقليل الحجم، لكن سنبقيه 0
+          make package FINALPACKAGE=1 messages
