@@ -1,0 +1,56 @@
+name: Build iOS UEDumper
+
+on:
+  workflow_dispatch: # يسمح لك بتشغيل البناء يدوياً من زر Actions
+  push:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: macos-latest # نستخدم ماك لأنه مشروع iOS
+
+    steps:
+      # 1. تحميل المستودع الحالي (الذي يحتوي على ملف الـ zip)
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. خطوة فك الضغط (الخطوة الجديدة والضرورية)
+      - name: Unzip Project Archive
+        run: |
+          echo "Starting extraction..."
+          unzip iOS_UEDumper-main.zip
+          echo "Extraction complete."
+          
+          # عرض الملفات للتأكد من أن فك الضغط تم بنجاح ولمعرفة اسم المجلد الناتج
+          ls -la
+
+      # 3. إعداد Theos (بما أنه مشروع iOS Tweak)
+      - name: Setup Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          path: theos
+          ref: master
+
+      # 4. بناء المشروع
+      - name: Build Project
+        run: |
+          # تعيين متغير البيئة لـ Theos
+          export THEOS=$(pwd)/theos
+          
+          # ندخل إلى المجلد الذي نتج عن فك الضغط (غالباً يكون بنفس اسم ملف الـ zip)
+          cd iOS_UEDumper-main
+          
+          # أمر البناء (تجاهل الأخطاء البسيطة ومحاولة بناء الحزمة)
+          make package FINALPACKAGE=1
+          
+          # عرض ملفات الحزمة الناتجة
+          echo "Build contents:"
+          ls -la packages/
+
+      # 5. رفع ملف الـ DEB الناتج لتقوم بتحميله
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UEDumper-Deb
+          path: iOS_UEDumper-main/packages/*.deb
