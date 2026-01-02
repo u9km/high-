@@ -1,145 +1,229 @@
-name: Ultimate Builder (Auto-Fix + Deps + Keystone)
+name: Build (Unzip + Auto Root + New Makefile)
 
 on:
   push:
-    branches: [ "**" ]
+    branches: ["**"]
   workflow_dispatch:
 
 jobs:
-  build_all:
+  build:
     runs-on: macos-latest
-    permissions:
-      contents: write
-      
+
     steps:
-      - name: 1. Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ------------------------------------------------------------------
-      # الخطوة 1: البحث الذكي عن المشروع (يعالج مشاكل المجلدات)
-      # ------------------------------------------------------------------
-      - name: 2. Smart Unzip & Locate
+      - name: 1) Unzip all zip(s) + print full tree
+        shell: bash
         run: |
-          # فك ضغط أي ملف zip
-          find . -name "*.zip" -exec unzip -o -q {} \;
-          
-          # البحث عن ملف كود (.xm) لتحديد مكان المشروع الحقيقي
-          SOURCE_FILE=$(find . -name "*.xm" | head -n 1)
-          
-          if [ -z "$SOURCE_FILE" ]; then
-            echo "::error::لم يتم العثور على أي ملف كود (.xm)! تأكد من رفع الملفات."
+          set -euo pipefail
+          rm -rf _extract
+          mkdir -p _extract
+
+          echo "🔎 ZIP files in repo:"
+          ls -la *.zip 2>/dev/null || true
+
+          # فك كل zip (لو واحد أو أكثر)
+          shopt -s nullglob
+          for z in *.zip; do
+            echo "📦 Unzipping: $z"
+            unzip -o -q "$z" -d _extract
+          done
+
+          echo "✅ Full extracted tree (depth 6):"
+          find _extract -maxdepth 6 -print
+
+      - name: 2) Locate PROJECT_ROOT automatically
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # نبحث عن مجلد فيه src/Tweak.mm أو Tweak.xm أو Makefile أو control
+          # (الأولوية لمجلد Tweak إن وجد)
+          CANDIDATE="$(
+            find _extract -type f \( -name "Tweak.mm" -o -name "Tweak.xm" -o -name "Tweak.m" -o -name "Makefile" -o -name "control" \) \
+              | sed 's|/[^/]*$||' \
+              | awk '
+                  { print $0 }
+                ' \
+              | sort -u \
+              | awk '
+                  /\/Tweak(\/|$)/ { print; exit }
+                  { last=$0 }
+                  END { if (NR>0) print last }
+                ' \
+              | head -n 1
+          )"
+
+          if [ -z "${CANDIDATE:-}" ]; then
+            echo "❌ PROJECT_ROOT not found inside _extract"
             exit 1
           fi
-          
-          # حفظ مسار المشروع
-          PROJECT_DIR=$(dirname "$SOURCE_FILE")
-          echo "✅ تم العثور على المشروع في: $PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
-      # ------------------------------------------------------------------
-      # الخطوة 2: تحميل كل المكتبات (KittyMemory, fmt, Keystone)
-      # ------------------------------------------------------------------
-      - name: 3. Install All Dependencies
+          echo "✅ PROJECT_ROOT=$CANDIDATE"
+          echo "PROJECT_ROOT=$CANDIDATE" >> "$GITHUB_ENV"
+
+      - name: 3) Prepare deps (KittyMemory) if missing + print include dirs
+        shell: bash
         run: |
-          cd ${{ env.PROJECT_DIR }}
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+
           mkdir -p deps
-          
-          echo "⬇️ Downloading Dependencies..."
-          rm -rf deps/KittyMemory deps/fmt deps/keystone
-          
-          # KittyMemory (للذاكرة)
-          git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
-          
-          # fmt (للنصوص)
-          git clone --depth=1 https://github.com/fmtlib/fmt.git deps/fmt
-          
-          # Keystone (التي سألت عنها - محرك الأسمبلي)
-          # نقوم بتحميلها لضمان وجود ملفات الهيدر (Headers)
-          git clone --depth=1 https://github.com/keystone-engine/keystone.git deps/keystone
 
-      # ------------------------------------------------------------------
-      # الخطوة 3: الحل الجذري - كتابة Makefile شامل وجديد
-      # ------------------------------------------------------------------
-      - name: 4. Generate Ultimate Makefile
+          # ابحث عن KittyInclude.hpp داخل الاستخراج كله
+          KITTY_HDR="$(find .. -type f -name "KittyInclude.hpp" | head -n 1 || true)"
+
+          if [ -n "${KITTY_HDR:-}" ]; then
+            echo "✅ Found KittyInclude.hpp: $KITTY_HDR"
+            # خذ جذر KittyMemory (غالباً .../KittyMemory/KittyMemory/KittyInclude.hpp)
+            KITTY_DIR="$(dirname "$KITTY_HDR")"
+            # لو المسار ينتهي بـ KittyMemory/KittyMemory خلّ الجذر هو الأول
+            if [ "$(basename "$KITTY_DIR")" = "KittyMemory" ] && [ "$(basename "$(dirname "$KITTY_DIR")")" = "KittyMemory" ]; then
+              KITTY_ROOT="$(dirname "$KITTY_DIR")"
+            else
+              KITTY_ROOT="$KITTY_DIR"
+            fi
+
+            rm -rf deps/KittyMemory
+            mkdir -p deps/KittyMemory
+            cp -R "$KITTY_ROOT/"* deps/KittyMemory/ || true
+          else
+            echo "⚠️ KittyInclude.hpp not found in zip. Cloning KittyMemory..."
+            rm -rf deps/KittyMemory
+            git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
+          fi
+
+          echo "📌 deps/KittyMemory tree (depth 4):"
+          find deps/KittyMemory -maxdepth 4 -print || true
+
+      - name: 4) Delete old Makefile + generate NEW Makefile safely (fix missing separator)
+        shell: bash
         run: |
-          cd ${{ env.PROJECT_DIR }}
-          
-          echo "♻️ Deleting old Makefile..."
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+
           rm -f Makefile
-          
-          echo "📝 Writing NEW Makefile..."
-          # هذا الملف الجديد يربط كل المكتبات معاً ويصحح الأخطاء
-          cat > Makefile <<EOF
-          TARGET := iphone:clang:latest:14.0
-          ARCHS = arm64
-          include \$(THEOS)/makefiles/common.mk
 
-          TWEAK_NAME = UEDumper
+          # نجمع ملفات السورس فعلياً (ونستثني أمثلة الأندرويد داخل KittyMemory لتجنب link.h وغيره)
+          python3 - <<'PY'
+          import os, subprocess, shlex
 
-          # جمع كل ملفات السورس
-          UEDumper_FILES = \$(wildcard *.xm) \$(wildcard *.mm) \$(wildcard *.cpp) \$(wildcard src/*.cpp) \$(wildcard src/*.mm)
-          
-          # إعدادات التضمين (Include Paths) لكل المكتبات
-          # لاحظ أننا أضفنا Keystone و fmt و KittyMemory
-          UEDumper_CCFLAGS = -std=c++17 \
-            -I"deps/KittyMemory" \
-            -I"deps/fmt/include" \
-            -I"deps/keystone/include" \
-            -DFMT_HEADER_ONLY
+          root = os.getcwd()
 
-          UEDumper_CFLAGS = -I"deps/KittyMemory" -I"deps/fmt/include" -I"deps/keystone/include"
-          
-          # تجاهل بعض التحذيرات المزعجة
-          UEDumper_CCFLAGS += -Wno-unused-variable -Wno-unused-function
-          
-          include \$(THEOS_MAKE_PATH)/tweak.mk
-          EOF
-          
-          echo "✅ Makefile created successfully."
+          def run(cmd):
+            return subprocess.check_output(cmd, cwd=root, text=True).splitlines()
 
-      # ------------------------------------------------------------------
-      # الخطوة 4: إعداد Theos
-      # ------------------------------------------------------------------
-      - name: 5. Setup Theos
-        uses: actions/checkout@v4
-        with:
-          repository: theos/theos
-          path: theos
-          ref: master
+          # ابحث عن ملفات tweak/sources داخل المشروع (src + الجذر)
+          files = []
+          for pat in ["*.xm","*.mm","*.m","src/**/*.mm","src/**/*.m","src/**/*.cpp","src/**/*.cc","src/**/*.c","src/**/*.hpp","src/**/*.h"]:
+            pass
 
-      # ------------------------------------------------------------------
-      # الخطوة 5: البناء واستخراج ملفات الحقن (Dylib)
-      # ------------------------------------------------------------------
-      - name: 6. Build & Extract Dylib
+          # استخدم find لأن glob في بايثون مع ** يحتاج ضبط
+          find_cmd = [
+            "bash","-lc",
+            r"""
+            set -e
+            find . -type f \( \
+              -name "*.xm" -o -name "*.mm" -o -name "*.m" -o -name "*.cpp" -o -name "*.cc" -o -name "*.c" \
+            \) \
+            | sed 's|^\./||' \
+            | grep -v '^deps/KittyMemory/example' \
+            | grep -v '^deps/KittyMemory/Example' \
+            | grep -v '^deps/KittyMemory/Examples' \
+            | grep -v '^deps/KittyMemory/Android' \
+            | grep -v '^deps/KittyMemory/example-android' \
+            | sort
+            """
+          ]
+          all_src = run(find_cmd)
+
+          # فلتر: لا تدخل ملفات داخل .theos أو packages أو build artifacts
+          all_src = [f for f in all_src if not (f.startswith(".theos/") or f.startswith("packages/") or "/.theos/" in f)]
+
+          # إذا مشروعك موجود داخل مجلدات أخرى، أهم شيء عندنا Tweak.* و src/*
+          if not all_src:
+            raise SystemExit("No source files found to include in Makefile.")
+
+          # اسم التويك
+          tweak_name = "UEDumper"
+
+          makefile = f"""TARGET := iphone:clang:latest:14.0
+ARCHS := arm64 arm64e
+THEOS_PACKAGE_SCHEME := rootless
+
+include $(THEOS)/makefiles/common.mk
+
+TWEAK_NAME := {tweak_name}
+
+# Auto-collected sources (existing only)
+{tweak_name}_FILES := \\
+"""
+          for i, f in enumerate(all_src):
+            sep = " \\\n" if i != len(all_src)-1 else "\n"
+            makefile += f"\t{f}{sep}"
+
+          makefile += f"""
+{tweak_name}_FRAMEWORKS := UIKit Foundation Security
+{tweak_name}_CFLAGS += -fobjc-arc -Wno-error -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-parameter
+{tweak_name}_CCFLAGS += -std=c++17
+
+# Includes (add more if your project needs)
+{tweak_name}_CFLAGS += -I.
+{tweak_name}_CFLAGS += -Isrc
+{tweak_name}_CFLAGS += -Ideps/KittyMemory
+{tweak_name}_CFLAGS += -Ideps/KittyMemory/KittyMemory
+
+include $(THEOS_MAKE_PATH)/tweak.mk
+"""
+          # اكتب بدون أي مسافات بادئة تسبب "missing separator"
+          with open("Makefile","w",newline="\n") as fp:
+            fp.write(makefile)
+
+          print("✅ Generated Makefile with", len(all_src), "source files")
+          PY
+
+          echo "📄 Makefile preview (first 120 lines):"
+          nl -ba Makefile | head -n 120
+
+      - name: 5) Setup Theos + SDKs (fix 'sdks already exists')
+        shell: bash
         run: |
-          export THEOS=$(pwd)/theos
-          cd ${{ env.PROJECT_DIR }}
-          
-          echo "🚀 Building Project..."
-          make clean
-          # رسائل الخطأ ستكون مفصلة
-          make package FINALPACKAGE=1 messages=yes
-          
-          # تجهيز المخرجات
-          mkdir -p ../FINAL_OUTPUT
-          
-          echo "🔎 Extracting Dylib (For Injection)..."
-          # استخراج ملف Dylib الصافي من قلب Theos
-          find .theos -name "*.dylib" -exec cp {} ../FINAL_OUTPUT/UEDumper_Injection.dylib \;
-          
-          # نسخ ملف DEB أيضاً
-          cp packages/*.deb ../FINAL_OUTPUT/ 2>/dev/null || true
-          
-          echo "✅ Build Complete."
-          ls -la ../FINAL_OUTPUT/
+          set -euo pipefail
 
-      # ------------------------------------------------------------------
-      # الخطوة 6: الرفع
-      # ------------------------------------------------------------------
-      - name: 7. Upload Result
+          rm -rf "$HOME/theos"
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+
+          # حل خطأ: destination path .../theos/sdks already exists
+          rm -rf "$HOME/theos/sdks"
+          git clone --depth=1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
+
+          # أدوات مطلوبة
+          brew update
+          brew install ldid xz || true
+
+          echo "✅ Theos installed at: $HOME/theos"
+          ls -la "$HOME/theos/sdks" | head -n 50 || true
+
+      - name: 6) Build (package)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+
+          echo "🚀 Building in: $PWD"
+          make clean || true
+          make package FINALPACKAGE=1 messages=yes
+
+      - name: 7) Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: UEDumper_Final_Files
-          path: FINAL_OUTPUT/*
+          name: Build_Artifacts
+          path: |
+            ${{ env.PROJECT_ROOT }}/packages/*.deb
+            ${{ env.PROJECT_ROOT }}/.theos/obj/**/*
