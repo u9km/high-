@@ -1,4 +1,4 @@
-name: Ultimate UEDumper (Non-Jailbreak Dylib)
+name: UEDumper (Smart Zip + Auto Deps + No Jailbreak)
 
 on:
   push:
@@ -8,131 +8,69 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ------------------------------------------------------------
-      # 1) فك الضغط عن كل الملفات (بما في ذلك المتداخلة)
-      # ------------------------------------------------------------
-      - name: 1) Unzip ALL zips recursively
+      # ---------------------------------------------------------
+      # 1) استخراج ذكي لكل الملفات المضغوطة (حتى المتداخلة)
+      # ---------------------------------------------------------
+      - name: 1) Extract all zip files (recursive)
         shell: bash
         run: |
           set -euo pipefail
           rm -rf _extract
           mkdir -p _extract
-          echo "🔎 Searching for zip files..."
-          find . -maxdepth 1 -type f -name "*.zip" -print
-          while IFS= read -r z; do
-            base="$(basename "$z" .zip)"
-            dest="_extract/$base"
-            mkdir -p "$dest"
-            unzip -o -q "$z" -d "$dest"
-          done < <(find . -maxdepth 1 -type f -name "*.zip" -print)
-          
-          # فك الضغط المتداخل
-          for i in 1 2 3; do
-            nested_count="$(find _extract -type f -name "*.zip" | wc -l | tr -d ' ')"
-            if [ "$nested_count" = "0" ]; then break; fi
-            echo "➡️ Pass $i: found nested zips"
-            while IFS= read -r nz; do
-              ndest="$(dirname "$nz")/__unzipped__$(basename "$nz" .zip)"
-              mkdir -p "$ndest"
-              unzip -o -q "$nz" -d "$ndest" || true
-              rm -f "$nz"
-            done < <(find _extract -type f -name "*.zip" -print)
+
+          echo "🔎 Searching for zip files (top-level)..."
+          # نسخ الملفات المضغوطة لمجلد العمل
+          find . -maxdepth 2 -type f -name "*.zip" -print0 | while IFS= read -r -d '' z; do
+            echo "📦 Unzipping: $z"
+            unzip -o -q "$z" -d _extract
           done
 
-      # ------------------------------------------------------------
-      # 2) تحديد مكان Makefile
-      # ------------------------------------------------------------
+          # حلقة تكرارية لفك الضغط المتداخل (zip داخل zip)
+          ITER=0
+          while true; do
+            ITER=$((ITER+1))
+            ZCOUNT=$(find _extract -type f -name "*.zip" | wc -l | tr -d ' ')
+            if [ "$ZCOUNT" = "0" ]; then break; fi
+            echo "🔁 Nested zip pass #$ITER (found $ZCOUNT zips)..."
+            find _extract -type f -name "*.zip" -print0 | while IFS= read -r -d '' z; do
+              DIR=$(dirname "$z")
+              unzip -o -q "$z" -d "$DIR"
+              rm -f "$z" || true
+            done
+          done
+          echo "✅ Extract done."
+
+      # ---------------------------------------------------------
+      # 2) تحديد مجلد المشروع تلقائياً
+      # ---------------------------------------------------------
       - name: 2) Locate PROJECT_ROOT
         shell: bash
         run: |
           set -euo pipefail
-          MF=""
-          while IFS= read -r f; do
-            if grep -qE "THEOS|common\.mk|tweak\.mk" "$f" 2>/dev/null; then
-              MF="$f"
-              break
-            fi
-          done < <(find _extract -type f -name "Makefile" -print)
-          
-          if [ -z "${MF}" ]; then MF="$(find _extract -type f -name "Makefile" | head -n 1 || true)"; fi
-          if [ -z "${MF}" ]; then echo "❌ No Makefile found."; exit 1; fi
-          
-          PROJECT_ROOT="$(cd "$(dirname "$MF")" && pwd)"
+          MF=$(find _extract -type f -name "Makefile" | grep -E "/Tweak/Makefile$" | head -n 1 || true)
+          if [ -z "${MF:-}" ]; then
+            MF=$(find _extract -type f -name "Makefile" | head -n 1 || true)
+          fi
+
+          if [ -z "${MF:-}" ]; then
+            echo "❌ ERROR: Makefile not found."
+            exit 1
+          fi
+
+          PROJECT_ROOT=$(dirname "$MF")
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
-          echo "✅ Project found at: $PROJECT_ROOT"
+          echo "✅ PROJECT_ROOT = $PROJECT_ROOT"
 
-      # ------------------------------------------------------------
-      # 3 & 4) تجهيز المكتبات (KittyMemory + fmt)
-      # ------------------------------------------------------------
-      - name: 3) Ensure Dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_ROOT"
-          mkdir -p deps
-          
-          # KittyMemory
-          KITTY_H="$(find "$PROJECT_ROOT" -type f -name "KittyInclude.hpp" | head -n 1 || true)"
-          if [ -z "${KITTY_H}" ]; then
-            git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
-            KITTY_H="$(find "$PROJECT_ROOT/deps/KittyMemory" -type f -name "KittyInclude.hpp" | head -n 1)"
-          fi
-          KITTY_INC_DIR="$(cd "$(dirname "$KITTY_H")" && pwd)"
-          echo "KITTY_INC_DIR=$KITTY_INC_DIR" >> "$GITHUB_ENV"
-          
-          # fmt
-          FMT_H="$(find "$PROJECT_ROOT" -type f -path "*/fmt/format.h" | head -n 1 || true)"
-          if [ -z "${FMT_H}" ]; then
-            git clone --depth=1 https://github.com/fmtlib/fmt.git deps/fmt
-            FMT_H="$(find "$PROJECT_ROOT/deps/fmt" -type f -path "*/fmt/format.h" | head -n 1)"
-          fi
-          # Check if include/fmt or just fmt
-          if echo "$FMT_H" | grep -q "/include/fmt/format.h"; then
-             FMT_INC_DIR="$(cd "$(dirname "$(dirname "$FMT_H")")" && pwd)"
-          else
-             FMT_INC_DIR="$(cd "$(dirname "$(dirname "$FMT_H")")" && pwd)"
-          fi
-          echo "FMT_INC_DIR=$FMT_INC_DIR" >> "$GITHUB_ENV"
-
-      # ------------------------------------------------------------
-      # 5) إصلاح Makefile تلقائياً
-      # ------------------------------------------------------------
-      - name: 5) Auto-fix Makefile
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_ROOT"
-          MF="Makefile"
-          
-          # استخراج اسم الأداة
-          PREFIX="$(grep -E '^[A-Za-z0-9_]+_NAME\s*=' "$MF" | head -n 1 | cut -d'_' -f1 || true)"
-          if [ -z "${PREFIX}" ]; then PREFIX="UEDumper"; fi
-          
-          # إصلاح قائمة الملفات لتشمل كل شيء (Wildcards)
-          if grep -qE "^${PREFIX}_FILES\s*=" "$MF"; then
-            perl -0777 -i -pe "s/^${PREFIX}_FILES\\s*=.*?(\\n\\n|\\ninclude )/${PREFIX}_FILES = \$(wildcard *.xm) \$(wildcard *.mm) \$(wildcard *.m) \$(wildcard src/*.xm) \$(wildcard src/*.mm) \$(wildcard src/*.cpp) \$(wildcard *.cpp)\\n\\n\\1/sm" "$MF" || true
-          else
-            echo "${PREFIX}_FILES = \$(wildcard *.xm) \$(wildcard *.mm) \$(wildcard *.m) \$(wildcard *.cpp)" >> "$MF"
-          fi
-
-          # إضافة مسارات التضمين
-          {
-            echo ""
-            echo "${PREFIX}_CCFLAGS += -std=c++17 -I\"$KITTY_INC_DIR\" -I\"$FMT_INC_DIR\" -DFMT_HEADER_ONLY"
-            echo "${PREFIX}_CFLAGS  += -I\"$KITTY_INC_DIR\" -I\"$FMT_INC_DIR\""
-          } >> "$MF"
-
-      # ------------------------------------------------------------
-      # 6) تثبيت Theos
-      # ------------------------------------------------------------
-      - name: 6) Setup Theos
+      # ---------------------------------------------------------
+      # 3) تثبيت Theos
+      # ---------------------------------------------------------
+      - name: 3) Setup Theos
         shell: bash
         run: |
           rm -rf "$HOME/theos"
@@ -140,37 +78,99 @@ jobs:
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           rm -rf "$HOME/theos/sdks"
           git clone --depth=1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
-          brew install ldid xz
+          rm -rf "$HOME/theos/sdks/iPhoneOS"{9..13}.sdk || true
+          brew install ldid xz fmt
 
-      # ------------------------------------------------------------
-      # 7) البناء (للحقن بدون جلبريك)
-      # ------------------------------------------------------------
-      - name: 7) Build for Injection
+      # ---------------------------------------------------------
+      # 4) تجهيز مكتبة KittyMemory
+      # ---------------------------------------------------------
+      - name: 4) Ensure KittyMemory
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          mkdir -p deps
+
+          KITTY_HDR=$(find "$(cd ../.. && pwd)/_extract" -type f -name "KittyInclude.hpp" | head -n 1 || true)
+          if [ -n "${KITTY_HDR:-}" ]; then
+            SRC_DIR=$(dirname "$KITTY_HDR")
+            BASE_DIR=$(dirname "$SRC_DIR")
+            rm -rf deps/KittyMemory
+            cp -R "$BASE_DIR" deps/KittyMemory
+          else
+            rm -rf deps/KittyMemory
+            git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
+          fi
+
+          KI=$(find deps/KittyMemory -type f -name "KittyInclude.hpp" | head -n 1 || true)
+          KITTY_INC_DIR=$(dirname "$KI")
+          echo "KITTY_INC_DIR=$KITTY_INC_DIR" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------
+      # 5) إصلاح مكتبة ZipArchive
+      # ---------------------------------------------------------
+      - name: 5) Ensure ZipArchive
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+          mkdir -p deps
+          if [ ! -d "deps/ZipArchive" ]; then
+            git clone --depth=1 https://github.com/ZipArchive/ZipArchive.git deps/ZipArchive
+          fi
+          mkdir -p deps/SSZipArchive/SSZipArchive
+          cat > deps/SSZipArchive/SSZipArchive/ZipArchive.h <<'EOF'
+          #pragma once
+          #import "ZipArchive.h"
+          EOF
+
+      # ---------------------------------------------------------
+      # 6) البناء (تعديل للبدون جلبريك)
+      # ---------------------------------------------------------
+      - name: 6) Build (No Jailbreak Mode)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+
+          FMT_PREFIX="$(brew --prefix fmt)"
+          INC_FLAGS="-I${{ env.KITTY_INC_DIR }} -I$FMT_PREFIX/include -I$PWD/deps/ZipArchive -I$PWD/deps/ZipArchive/ZipArchive -I$PWD/deps/SSZipArchive"
+          LIB_FLAGS="-L$FMT_PREFIX/lib -lfmt"
+
+          make clean || true
+
+          # تم إزالة THEOS_PACKAGE_SCHEME=rootless لأننا نريد ملف dylib عادي
+          make package FINALPACKAGE=1 messages=yes \
+            ADDITIONAL_CFLAGS="$INC_FLAGS" \
+            ADDITIONAL_CCFLAGS="$INC_FLAGS -std=c++17" \
+            ADDITIONAL_LDFLAGS="$LIB_FLAGS"
+
+      # ---------------------------------------------------------
+      # 7) استخراج ورفع ملف Dylib
+      # ---------------------------------------------------------
+      - name: 7) Extract & Upload Dylib
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_ROOT"
           
-          echo "🚀 Building..."
-          make clean || true
-          # هنا البناء القياسي لإنتاج dylib متوافق
-          make package FINALPACKAGE=1 messages=yes
-
-          echo "📦 Preparing files for upload..."
           mkdir -p output_files
           
-          # نسخ ملف DEB
+          echo "📦 Finding compiled files..."
+          
+          # 1. نسخ ملف DEB (احتياطي)
           cp packages/*.deb output_files/ 2>/dev/null || true
           
-          # أهم خطوة للبدون جلبريك: استخراج الـ dylib
-          # عادة يكون في .theos/obj/debug أو .theos/obj
-          find .theos/obj -name "*.dylib" -exec cp {} output_files/ \;
+          # 2. استخراج الـ Dylib (هذا هو الملف المهم للحقن)
+          # نبحث عنه داخل مجلدات Theos المخفية (.theos/obj/debug أو .theos/obj)
+          echo "🔎 Looking for .dylib file..."
+          find .theos -name "*.dylib" -exec cp {} output_files/ \;
           
-          echo "✅ Files ready:"
+          echo "✅ Files ready for upload:"
           ls -la output_files/
 
-      - name: Upload Files (Dylib & Deb)
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: UEDumper_NoJailbreak
+          name: UEDumper_NoJailbreak_Files
           path: ${{ env.PROJECT_ROOT }}/output_files/*
