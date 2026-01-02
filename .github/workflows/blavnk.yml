@@ -1,0 +1,76 @@
+name: Fix Build
+
+on:
+  push:
+    branches: [ "**" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      # 1. البحث عن ملف Zip وفك ضغطه
+      - name: Unzip
+        run: |
+          find . -name "*.zip" -exec unzip -o -q {} \;
+          
+      # 2. تحديد مسار المشروع الصحيح
+      - name: Find Project
+        run: |
+          # نبحث عن ملف Tweak.xm أو أي ملف .xm لنعرف مكان الكود
+          SRC=$(find . -name "*.xm" | head -n 1)
+          if [ -z "$SRC" ]; then echo "No Source Found"; exit 1; fi
+          DIR=$(dirname "$SRC")
+          echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
+          echo "Found source in: $DIR"
+
+      # 3. تثبيت المكتبات
+      - name: Install Deps
+        run: |
+          cd ${{ env.PROJECT_DIR }}
+          mkdir -p deps
+          rm -rf deps/KittyMemory deps/fmt
+          git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
+          git clone --depth=1 https://github.com/fmtlib/fmt.git deps/fmt
+
+      # 4. كتابة Makefile جديد (الحل الجذري)
+      - name: Write Makefile
+        run: |
+          cd ${{ env.PROJECT_DIR }}
+          rm -f Makefile
+          cat > Makefile <<EOF
+          TARGET := iphone:clang:latest:14.0
+          ARCHS = arm64
+          include \$(THEOS)/makefiles/common.mk
+          TWEAK_NAME = UEDumper
+          UEDumper_FILES = \$(wildcard *.xm) \$(wildcard *.mm) \$(wildcard *.cpp) \$(wildcard src/*.cpp) \$(wildcard src/*.mm)
+          UEDumper_CCFLAGS = -std=c++17 -I"deps/KittyMemory" -I"deps/fmt/include" -DFMT_HEADER_ONLY
+          UEDumper_CFLAGS = -I"deps/KittyMemory" -I"deps/fmt/include"
+          include \$(THEOS_MAKE_PATH)/tweak.mk
+          EOF
+
+      # 5. إعداد Theos
+      - uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          path: theos
+          ref: master
+
+      # 6. البناء
+      - name: Build
+        run: |
+          export THEOS=$(pwd)/theos
+          cd ${{ env.PROJECT_DIR }}
+          make package FINALPACKAGE=1 messages=yes
+          
+          # استخراج الملفات
+          mkdir -p ../out
+          find .theos -name "*.dylib" -exec cp {} ../out/UEDumper_Injection.dylib \;
+          cp packages/*.deb ../out/ 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UEDumper_Files
+          path: out/*
