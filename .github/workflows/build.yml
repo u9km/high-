@@ -1,30 +1,26 @@
-name: Build iOS UEDumper
+name: Build UEDumper (Non-Jailbreak)
 
 on:
-  workflow_dispatch: # يسمح لك بتشغيل البناء يدوياً من زر Actions
-  push:
-    branches: [ "main" ]
+  workflow_dispatch: # زر التشغيل اليدوي
 
 jobs:
   build:
-    runs-on: macos-latest # نستخدم ماك لأنه مشروع iOS
+    runs-on: macos-latest
 
     steps:
-      # 1. تحميل المستودع الحالي (الذي يحتوي على ملف الـ zip)
+      # 1. تحميل الملفات (بما في ذلك الملف المضغوط)
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. خطوة فك الضغط (الخطوة الجديدة والضرورية)
-      - name: Unzip Project Archive
+      # 2. فك الضغط عن الملف (هذه الخطوة كانت ناقصة وتسببت بالمشكلة)
+      - name: Unzip Project
         run: |
-          echo "Starting extraction..."
+          echo "Starting Unzip..."
           unzip iOS_UEDumper-main.zip
-          echo "Extraction complete."
-          
-          # عرض الملفات للتأكد من أن فك الضغط تم بنجاح ولمعرفة اسم المجلد الناتج
-          ls -la
+          echo "Unzip Done. Listing files to confirm folder name:"
+          ls -F # لعرض المجلدات الناتجة للتأكد
 
-      # 3. إعداد Theos (بما أنه مشروع iOS Tweak)
+      # 3. تثبيت Theos (أداة البناء)
       - name: Setup Theos
         uses: actions/checkout@v4
         with:
@@ -32,25 +28,22 @@ jobs:
           path: theos
           ref: master
 
-      # 4. بناء المشروع
-      - name: Build Project
+      # 4. بناء المشروع (مع الدخول للمجلد الصحيح)
+      - name: Build Package
         run: |
-          # تعيين متغير البيئة لـ Theos
           export THEOS=$(pwd)/theos
           
-          # ندخل إلى المجلد الذي نتج عن فك الضغط (غالباً يكون بنفس اسم ملف الـ zip)
+          # ندخل للمجلد الذي نتج عن فك الضغط
           cd iOS_UEDumper-main
           
-          # أمر البناء (تجاهل الأخطاء البسيطة ومحاولة بناء الحزمة)
+          # أمر البناء. الخيار FINALPACKAGE=1 مهم لتقليل حجم الملف وتحسين الأداء
+          # هذا سينتج ملف DEB
           make package FINALPACKAGE=1
-          
-          # عرض ملفات الحزمة الناتجة
-          echo "Build contents:"
-          ls -la packages/
 
-      # 5. رفع ملف الـ DEB الناتج لتقوم بتحميله
+      # 5. رفع الملف الناتج
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: UEDumper-Deb
+          name: UEDumper-Tweak
+          # المسار للملف الناتج داخل المجلد المفكوك
           path: iOS_UEDumper-main/packages/*.deb
