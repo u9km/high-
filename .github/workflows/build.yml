@@ -44,15 +44,24 @@ jobs:
       # --------------------------------------------------
       # 3) Setup Theos
       # --------------------------------------------------
-      - name: Setup Theos
+      name: Setup Theos (clean + sdks fix)
         shell: bash
         run: |
           set -e
-          rm -rf $HOME/theos
-          git clone --recursive https://github.com/theos/theos.git $HOME/theos
-          git clone https://github.com/theos/sdks.git $HOME/theos/sdks
+
+          echo "🧹 Cleaning old Theos..."
+          rm -rf "$HOME/theos"
+
+          echo "⬇️ Cloning Theos..."
+          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+
+          echo "⬇️ Cloning SDKs..."
+          rm -rf "$HOME/theos/sdks"
+          git clone https://github.com/theos/sdks.git "$HOME/theos/sdks"
+
           echo "THEOS=$HOME/theos" >> $GITHUB_ENV
           echo "$HOME/theos/bin" >> $GITHUB_PATH
+
           brew install ldid
 
       # --------------------------------------------------
