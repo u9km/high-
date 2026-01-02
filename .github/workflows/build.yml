@@ -12,17 +12,17 @@ jobs:
       - name: 1. Checkout Code
         uses: actions/checkout@v4
 
-      # الحل لمشكلة dm.pl: تثبيت dpkg و ldid يدوياً
+      # حل مشكلة dm.pl: تثبيت الأدوات الضرورية يدوياً
       - name: 2. Install System Tools (Fix dm.pl)
         run: |
           brew update
-          brew install ldid dpkg make  # تثبيت الأداة التي سببت الخطأ في الصورة
+          brew install ldid dpkg make 
 
-      # فك الضغط والبحث عن المشروع مهما كان اسمه أو مكانه
+      # فك الضغط والبحث الذكي عن المشروع مهما كان اسمه
       - name: 3. Smart Unzip & Locate
         run: |
           find . -name "*.zip" -exec unzip -o -q {} \;
-          # البحث عن أي ملف برمجي (cpp, mm, xm) لتحديد المجلد
+          # البحث عن أي ملف برمجي (cpp, mm, xm) لتحديد المجلد الصحيح
           SOURCE_FILE=$(find . -type f \( -name "*.xm" -o -name "*.mm" -o -name "*.cpp" -o -name "*.c" \) | head -n 1)
           if [ -z "$SOURCE_FILE" ]; then
             echo "::error::لم يتم العثور على سورس كود!"
@@ -41,7 +41,7 @@ jobs:
           git clone --depth=1 https://github.com/fmtlib/fmt.git deps/fmt
           git clone --depth=1 https://github.com/keystone-engine/keystone.git deps/keystone
 
-      # إنشاء Makefile جديد يربط كل شيء معاً
+      # إنشاء ملفات الإعداد لضمان نجاح البناء
       - name: 5. Generate Makefile & Control
         run: |
           cd ${{ env.PROJECT_DIR }}
@@ -76,7 +76,7 @@ jobs:
           path: theos
           ref: master
 
-      # البناء النهائي واستخراج Dylib (للحقن بدون جلبريك)
+      # البناء النهائي واستخراج Dylib للحقن (بدون جلبريك)
       - name: 7. Build & Extract Result
         run: |
           export THEOS=$(pwd)/theos
