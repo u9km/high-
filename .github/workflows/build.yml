@@ -1,4 +1,4 @@
-name: Ultimate Zip Build (Auto scan + Auto Makefile)
+name: Ultimate UEDumper (Non-Jailbreak Dylib)
 
 on:
   push:
@@ -8,6 +8,7 @@ on:
 jobs:
   build:
     runs-on: macos-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,233 +16,161 @@ jobs:
           fetch-depth: 0
 
       # ------------------------------------------------------------
-      # 1) Extract ALL zip files (recursive) + show full paths
+      # 1) فك الضغط عن كل الملفات (بما في ذلك المتداخلة)
       # ------------------------------------------------------------
-      - name: 1) Extract all zips (recursive) + show paths
+      - name: 1) Unzip ALL zips recursively
         shell: bash
         run: |
           set -euo pipefail
-
           rm -rf _extract
           mkdir -p _extract
-
-          echo "🔎 Searching for zip files in repo root..."
-          ls -la
-
-          # فك ضغط كل zips الموجودة في جذر الريبو
-          shopt -s nullglob
-          for z in *.zip; do
-            echo "📦 Unzipping: $z -> _extract/"
-            unzip -o -q "$z" -d _extract
+          echo "🔎 Searching for zip files..."
+          find . -maxdepth 1 -type f -name "*.zip" -print
+          while IFS= read -r z; do
+            base="$(basename "$z" .zip)"
+            dest="_extract/$base"
+            mkdir -p "$dest"
+            unzip -o -q "$z" -d "$dest"
+          done < <(find . -maxdepth 1 -type f -name "*.zip" -print)
+          
+          # فك الضغط المتداخل
+          for i in 1 2 3; do
+            nested_count="$(find _extract -type f -name "*.zip" | wc -l | tr -d ' ')"
+            if [ "$nested_count" = "0" ]; then break; fi
+            echo "➡️ Pass $i: found nested zips"
+            while IFS= read -r nz; do
+              ndest="$(dirname "$nz")/__unzipped__$(basename "$nz" .zip)"
+              mkdir -p "$ndest"
+              unzip -o -q "$nz" -d "$ndest" || true
+              rm -f "$nz"
+            done < <(find _extract -type f -name "*.zip" -print)
           done
-          shopt -u nullglob
-
-          # فك ضغط بشكل متكرر لو داخل _extract توجد zips ثانية
-          echo "🔁 Recursive unzip inside _extract (if any)..."
-          for i in $(seq 1 6); do
-            ZFOUND=$(find _extract -type f -name "*.zip" | head -n 1 || true)
-            if [ -z "${ZFOUND:-}" ]; then
-              echo "✅ No more nested zips."
-              break
-            fi
-
-            echo "➡️ Pass $i: found nested zips, extracting..."
-            while IFS= read -r zf; do
-              [ -f "$zf" ] || continue
-              zdir="$(dirname "$zf")"
-              echo "   - unzip $zf -> $zdir"
-              unzip -o -q "$zf" -d "$zdir"
-              rm -f "$zf"
-            done < <(find _extract -type f -name "*.zip")
-          done
-
-          echo "🧭 FULL TREE (depth 6):"
-          find "$(pwd)/_extract" -maxdepth 6 -print
 
       # ------------------------------------------------------------
-      # 2) Locate PROJECT_ROOT (Makefile preferred)
+      # 2) تحديد مكان Makefile
       # ------------------------------------------------------------
       - name: 2) Locate PROJECT_ROOT
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "🔍 Searching for Makefile..."
-          MAKEFILE_PATH="$(find _extract -type f -name "Makefile" | head -n 1 || true)"
-
-          if [ -n "${MAKEFILE_PATH:-}" ]; then
-            PROJECT_ROOT="$(dirname "$MAKEFILE_PATH")"
-            echo "✅ Found Makefile at: $MAKEFILE_PATH"
-          else
-            echo "⚠️ Makefile not found. Searching for source files..."
-            SRC_FILE="$(find _extract -type f \( -name "*.xm" -o -name "*.mm" -o -name "*.m" -o -name "*.cpp" -o -name "*.c" \) | head -n 1 || true)"
-            if [ -z "${SRC_FILE:-}" ]; then
-              echo "❌ ERROR: No Makefile and no source files found in extracted content."
-              exit 1
+          MF=""
+          while IFS= read -r f; do
+            if grep -qE "THEOS|common\.mk|tweak\.mk" "$f" 2>/dev/null; then
+              MF="$f"
+              break
             fi
-            # نخلي المشروع هو أقرب مجلد يحتوي على debian/control أو layout مشابه أو مجرد مجلد السورس
-            PROJECT_ROOT="$(dirname "$SRC_FILE")"
-            # إذا كان داخل src رجع خطوة للخلف
-            if [ "$(basename "$PROJECT_ROOT")" = "src" ]; then
-              PROJECT_ROOT="$(dirname "$PROJECT_ROOT")"
-            fi
-            echo "✅ Using source-based PROJECT_ROOT: $PROJECT_ROOT"
-          fi
-
+          done < <(find _extract -type f -name "Makefile" -print)
+          
+          if [ -z "${MF}" ]; then MF="$(find _extract -type f -name "Makefile" | head -n 1 || true)"; fi
+          if [ -z "${MF}" ]; then echo "❌ No Makefile found."; exit 1; fi
+          
+          PROJECT_ROOT="$(cd "$(dirname "$MF")" && pwd)"
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
-          echo "📌 PROJECT_ROOT (full): $(cd "$PROJECT_ROOT" && pwd)"
+          echo "✅ Project found at: $PROJECT_ROOT"
 
       # ------------------------------------------------------------
-      # 3) Ensure KittyMemory exists (search inside + fallback clone)
+      # 3 & 4) تجهيز المكتبات (KittyMemory + fmt)
       # ------------------------------------------------------------
-      - name: 3) Ensure KittyMemory exists (search + fallback clone)
+      - name: 3) Ensure Dependencies
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_ROOT"
-
           mkdir -p deps
-
-          echo "🔍 Searching for KittyInclude.hpp in ALL extracted files..."
-          KITTY_HEADER="$(find "$(cd .. && pwd)/.." -type f -name "KittyInclude.hpp" | head -n 1 || true)"
-
-          if [ -n "${KITTY_HEADER:-}" ]; then
-            echo "✅ Found KittyInclude.hpp at: $KITTY_HEADER"
-            # غالباً يكون المسار .../KittyMemory/KittyInclude.hpp أو .../KittyMemory/KittyMemory/KittyInclude.hpp
-            KITTY_DIR="$(dirname "$KITTY_HEADER")"
-
-            # إذا الملف داخل KittyMemory/KittyMemory/ خذ الأب
-            if [ "$(basename "$KITTY_DIR")" = "KittyMemory" ] && [ -d "$KITTY_DIR" ]; then
-              # OK
-              :
-            else
-              # حاول ترجع خطوة إذا اسم المجلد الأب KittyMemory
-              if [ "$(basename "$(dirname "$KITTY_DIR")")" = "KittyMemory" ]; then
-                KITTY_DIR="$(dirname "$KITTY_DIR")"
-              fi
-            fi
-
-            echo "📦 Copy KittyMemory dir: $KITTY_DIR -> $PROJECT_ROOT/deps/KittyMemory"
-            rm -rf "$PROJECT_ROOT/deps/KittyMemory"
-            mkdir -p "$PROJECT_ROOT/deps/KittyMemory"
-            cp -R "$KITTY_DIR"/. "$PROJECT_ROOT/deps/KittyMemory"/
-          else
-            echo "⚠️ KittyMemory not found inside zips. Cloning fallback..."
-            rm -rf "$PROJECT_ROOT/deps/KittyMemory"
-            git clone --depth=1 https://github.com/MJx0/KittyMemory.git "$PROJECT_ROOT/deps/KittyMemory"
+          
+          # KittyMemory
+          KITTY_H="$(find "$PROJECT_ROOT" -type f -name "KittyInclude.hpp" | head -n 1 || true)"
+          if [ -z "${KITTY_H}" ]; then
+            git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
+            KITTY_H="$(find "$PROJECT_ROOT/deps/KittyMemory" -type f -name "KittyInclude.hpp" | head -n 1)"
           fi
-
-          echo "🔎 Verify KittyInclude.hpp final location:"
-          find "$PROJECT_ROOT/deps/KittyMemory" -type f -name "KittyInclude.hpp" -maxdepth 6 -print || true
+          KITTY_INC_DIR="$(cd "$(dirname "$KITTY_H")" && pwd)"
+          echo "KITTY_INC_DIR=$KITTY_INC_DIR" >> "$GITHUB_ENV"
+          
+          # fmt
+          FMT_H="$(find "$PROJECT_ROOT" -type f -path "*/fmt/format.h" | head -n 1 || true)"
+          if [ -z "${FMT_H}" ]; then
+            git clone --depth=1 https://github.com/fmtlib/fmt.git deps/fmt
+            FMT_H="$(find "$PROJECT_ROOT/deps/fmt" -type f -path "*/fmt/format.h" | head -n 1)"
+          fi
+          # Check if include/fmt or just fmt
+          if echo "$FMT_H" | grep -q "/include/fmt/format.h"; then
+             FMT_INC_DIR="$(cd "$(dirname "$(dirname "$FMT_H")")" && pwd)"
+          else
+             FMT_INC_DIR="$(cd "$(dirname "$(dirname "$FMT_H")")" && pwd)"
+          fi
+          echo "FMT_INC_DIR=$FMT_INC_DIR" >> "$GITHUB_ENV"
 
       # ------------------------------------------------------------
-      # 4) Setup Theos clean + FIX sdks conflict + install fmt
+      # 5) إصلاح Makefile تلقائياً
       # ------------------------------------------------------------
-      - name: 4) Setup Theos (clean) + SDKs + fmt
+      - name: 5) Auto-fix Makefile
         shell: bash
         run: |
           set -euo pipefail
+          cd "$PROJECT_ROOT"
+          MF="Makefile"
+          
+          # استخراج اسم الأداة
+          PREFIX="$(grep -E '^[A-Za-z0-9_]+_NAME\s*=' "$MF" | head -n 1 | cut -d'_' -f1 || true)"
+          if [ -z "${PREFIX}" ]; then PREFIX="UEDumper"; fi
+          
+          # إصلاح قائمة الملفات لتشمل كل شيء (Wildcards)
+          if grep -qE "^${PREFIX}_FILES\s*=" "$MF"; then
+            perl -0777 -i -pe "s/^${PREFIX}_FILES\\s*=.*?(\\n\\n|\\ninclude )/${PREFIX}_FILES = \$(wildcard *.xm) \$(wildcard *.mm) \$(wildcard *.m) \$(wildcard src/*.xm) \$(wildcard src/*.mm) \$(wildcard src/*.cpp) \$(wildcard *.cpp)\\n\\n\\1/sm" "$MF" || true
+          else
+            echo "${PREFIX}_FILES = \$(wildcard *.xm) \$(wildcard *.mm) \$(wildcard *.m) \$(wildcard *.cpp)" >> "$MF"
+          fi
 
+          # إضافة مسارات التضمين
+          {
+            echo ""
+            echo "${PREFIX}_CCFLAGS += -std=c++17 -I\"$KITTY_INC_DIR\" -I\"$FMT_INC_DIR\" -DFMT_HEADER_ONLY"
+            echo "${PREFIX}_CFLAGS  += -I\"$KITTY_INC_DIR\" -I\"$FMT_INC_DIR\""
+          } >> "$MF"
+
+      # ------------------------------------------------------------
+      # 6) تثبيت Theos
+      # ------------------------------------------------------------
+      - name: 6) Setup Theos
+        shell: bash
+        run: |
           rm -rf "$HOME/theos"
           git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
-
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
-
-          # FIX: sdks already exists
           rm -rf "$HOME/theos/sdks"
           git clone --depth=1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
-
-          # تقليل حجم sdk (اختياري)
-          rm -rf "$HOME/theos/sdks/iPhoneOS"{9..13}".sdk" || true
-
-          brew update
-          brew install ldid xz fmt
-
-          echo "✅ Theos + SDKs + fmt ready."
+          brew install ldid xz
 
       # ------------------------------------------------------------
-      # 5) Auto-generate Makefile (solves missing file UEDumper.mm etc)
+      # 7) البناء (للحقن بدون جلبريك)
       # ------------------------------------------------------------
-      - name: 5) Auto-Generate Makefile (uses existing files only)
+      - name: 7) Build for Injection
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_ROOT"
-
-          echo "🧠 Scanning project for sources..."
-          echo "📌 Project full path: $(pwd)"
-
-          echo "🧾 Candidate sources (depth 6):"
-          find . -maxdepth 6 -type f \( -name "*.xm" -o -name "*.mm" -o -name "*.m" -o -name "*.cpp" -o -name "*.c" \) -print
-
-          # اختيار اسم tweak من الموجود
-          TWEAK_NAME="UEDumper"
-
-          # مسارات KittyMemory include (نستخرج مكان KittyInclude.hpp)
-          KITTY_INC_DIR="$(find deps/KittyMemory -type f -name "KittyInclude.hpp" -print | head -n 1 | xargs -I{} dirname "{}" || true)"
-          if [ -z "${KITTY_INC_DIR:-}" ]; then
-            # fallback
-            KITTY_INC_DIR="deps/KittyMemory"
-          fi
-
-          # fmt paths
-          FMT_PREFIX="$(brew --prefix fmt)"
-          echo "FMT_PREFIX=$FMT_PREFIX"
-
-          # إنشاء Makefile يعتمد على الموجود فعلاً (wildcards) ويمنع توقف بسبب ملف مفقود
-          rm -f Makefile
-          cat > Makefile <<EOF
-          TARGET := iphone:clang:latest:14.0
-          ARCHS = arm64 arm64e
-          THEOS_PACKAGE_SCHEME = rootless
-
-          include \$(THEOS)/makefiles/common.mk
-
-          TWEAK_NAME = ${TWEAK_NAME}
-
-          # ✅ Build only what exists:
-          ${TWEAK_NAME}_FILES = \\
-            \$(wildcard *.xm) \$(wildcard *.mm) \$(wildcard *.m) \\
-            \$(wildcard src/*.xm) \$(wildcard src/*.mm) \$(wildcard src/*.m) \\
-            \$(wildcard src/*.cpp) \$(wildcard src/*.c) \\
-            \$(wildcard src/*/*.mm) \$(wildcard src/*/*.m) \\
-            \$(wildcard src/*/*.cpp) \$(wildcard src/*/*.c) \\
-            \$(wildcard src/*/*/*.mm) \$(wildcard src/*/*/*.m) \\
-            \$(wildcard src/*/*/*.cpp) \$(wildcard src/*/*/*.c)
-
-          ${TWEAK_NAME}_FRAMEWORKS = UIKit Foundation Security
-
-          # KittyMemory + fmt include/lib
-          ${TWEAK_NAME}_CFLAGS += -fobjc-arc -Wno-error -Wno-deprecated-declarations -Wno-unused-variable
-          ${TWEAK_NAME}_CCFLAGS += -std=c++17 -I. -Isrc -I${KITTY_INC_DIR} -Ideps/KittyMemory -I${FMT_PREFIX}/include
-          ${TWEAK_NAME}_LDFLAGS += -L${FMT_PREFIX}/lib -lfmt
-
-          include \$(THEOS_MAKE_PATH)/tweak.mk
-          EOF
-
-          echo "✅ Makefile generated:"
-          sed -n '1,200p' Makefile
-
-      # ------------------------------------------------------------
-      # 6) Build
-      # ------------------------------------------------------------
-      - name: 6) Build package
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_ROOT"
-
+          
           echo "🚀 Building..."
           make clean || true
-          make package FINALPACKAGE=1 messages=yes THEOS_PACKAGE_SCHEME=rootless
+          # هنا البناء القياسي لإنتاج dylib متوافق
+          make package FINALPACKAGE=1 messages=yes
 
-          echo "📦 Packages:"
-          ls -la packages || true
-          find packages -maxdepth 2 -type f -name "*.deb" -print || true
+          echo "📦 Preparing files for upload..."
+          mkdir -p output_files
+          
+          # نسخ ملف DEB
+          cp packages/*.deb output_files/ 2>/dev/null || true
+          
+          # أهم خطوة للبدون جلبريك: استخراج الـ dylib
+          # عادة يكون في .theos/obj/debug أو .theos/obj
+          find .theos/obj -name "*.dylib" -exec cp {} output_files/ \;
+          
+          echo "✅ Files ready:"
+          ls -la output_files/
 
-      - name: 7) Upload DEB
+      - name: Upload Files (Dylib & Deb)
         uses: actions/upload-artifact@v4
         with:
-          name: Build_DEB
-          path: ${{ env.PROJECT_ROOT }}/packages/*.deb
+          name: UEDumper_NoJailbreak
+          path: ${{ env.PROJECT_ROOT }}/output_files/*
