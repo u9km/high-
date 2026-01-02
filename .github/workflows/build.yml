@@ -1,7 +1,8 @@
-name: iOS UEDumper Build (SAFE)
+name: Build Theos Tweak from ZIP (Auto Fix Deps + Smart Makefile)
 
 on:
   push:
+    branches: ["**"]
   workflow_dispatch:
 
 jobs:
@@ -11,118 +12,280 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # --------------------------------------------------
-      # 1) Unzip project
-      # --------------------------------------------------
-      - name: Unzip project zip
+      # 1) Unzip zip(s) into _extract and print tree
+      - name: 1) Unzip zip(s) + print full tree
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           rm -rf _extract
-          mkdir _extract
-          unzip -o *.zip -d _extract
-          echo "Extracted tree:"
-          find _extract -maxdepth 3 -type d
+          mkdir -p _extract
 
-      # --------------------------------------------------
-      # 2) Locate PROJECT_ROOT
-      # --------------------------------------------------
-      - name: Locate PROJECT_ROOT
-        shell: bash
-        run: |
-          set -e
-          ROOT=$(find _extract -name Makefile -o -name Tweak.mm -o -name Tweak.xm | head -n 1)
-          if [ -z "$ROOT" ]; then
-            echo "❌ Project root not found"
+          echo "🔎 Searching for zip files in repo root..."
+          ls -la
+
+          ZIP_COUNT="$(find . -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')"
+          if [ "$ZIP_COUNT" = "0" ]; then
+            echo "❌ No .zip found in repo root."
             exit 1
           fi
-          PROJECT_ROOT=$(dirname "$ROOT")
-          echo "PROJECT_ROOT=$PROJECT_ROOT" >> $GITHUB_ENV
-          echo "PROJECT_ROOT = $PROJECT_ROOT"
 
-      # --------------------------------------------------
-      # 3) Setup Theos
-      # --------------------------------------------------
-      name: Setup Theos (clean + sdks fix)
+          echo "📦 Unzipping all zip files into _extract/ ..."
+          for z in *.zip; do
+            [ -f "$z" ] || continue
+            echo "  -> $z"
+            unzip -o -q "$z" -d _extract
+          done
+
+          echo "✅ Top tree:"
+          find _extract -maxdepth 4 -type d -print
+
+      # 2) Locate PROJECT_ROOT (folder containing Makefile + src)
+      - name: 2) Locate PROJECT_ROOT (auto)
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "🧹 Cleaning old Theos..."
-          rm -rf "$HOME/theos"
+          echo "🔍 Finding Makefile inside _extract ..."
+          MF="$(find _extract -type f -name Makefile | head -n 1 || true)"
+          if [ -z "${MF:-}" ]; then
+            echo "❌ Makefile not found after unzip."
+            echo "📌 Showing some files:"
+            find _extract -maxdepth 5 -type f | head -n 200
+            exit 1
+          fi
 
-          echo "⬇️ Cloning Theos..."
-          git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
+          PROJECT_ROOT="$(cd "$(dirname "$MF")" && pwd)"
+          echo "✅ PROJECT_ROOT=$PROJECT_ROOT"
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
-          echo "⬇️ Cloning SDKs..."
-          rm -rf "$HOME/theos/sdks"
-          git clone https://github.com/theos/sdks.git "$HOME/theos/sdks"
+          echo "📌 PROJECT_ROOT listing:"
+          ls -la "$PROJECT_ROOT"
 
-          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
-          echo "$HOME/theos/bin" >> $GITHUB_PATH
-
-          brew install ldid
-
-      # --------------------------------------------------
-      # 4) Delete Makefile + Generate SAFE Makefile
-      # --------------------------------------------------
-      - name: Generate Makefile
+      # 3) Fix deps (KittyMemory + SSZipArchive) by searching inside extracted tree, else clone
+      - name: 3) Fix deps (KittyMemory + SSZipArchive) and print exact include dirs
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           cd "$PROJECT_ROOT"
+
+          mkdir -p deps
+
+          echo "🔎 Searching for KittyInclude.hpp inside extracted content..."
+          KITTY_HEADER="$(find "$(dirname "$PROJECT_ROOT")" -type f -name "KittyInclude.hpp" | head -n 1 || true)"
+
+          if [ -n "${KITTY_HEADER:-}" ]; then
+            echo "✅ Found KittyInclude.hpp at: $KITTY_HEADER"
+            # usually .../KittyMemory/KittyMemory/KittyInclude.hpp
+            KITTY_BASE="$(cd "$(dirname "$KITTY_HEADER")/.." && pwd)"
+            # ensure it contains KittyMemory folder
+            rm -rf deps/KittyMemory
+            mkdir -p deps/KittyMemory
+            cp -R "$KITTY_BASE"/* deps/KittyMemory/ || true
+          else
+            echo "⚠️ KittyInclude.hpp not found -> cloning KittyMemory..."
+            rm -rf deps/KittyMemory
+            git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
+          fi
+
+          # Find exact include dir for KittyInclude.hpp
+          KITTY_INC_DIR="$(find deps/KittyMemory -type f -name "KittyInclude.hpp" -print | head -n 1 | xargs dirname)"
+          if [ -z "${KITTY_INC_DIR:-}" ]; then
+            echo "❌ KittyInclude.hpp still not found after fix."
+            find deps/KittyMemory -maxdepth 4 -type f | head -n 200
+            exit 1
+          fi
+          echo "✅ KITTY_INC_DIR=$KITTY_INC_DIR"
+
+          echo "🔎 Searching for SSZipArchive headers inside extracted content..."
+          # We accept SSZipArchive.h or ZipArchive.h
+          SSZIP_H1="$(find "$(dirname "$PROJECT_ROOT")" -type f -name "SSZipArchive.h" | head -n 1 || true)"
+          SSZIP_H2="$(find "$(dirname "$PROJECT_ROOT")" -type f -name "ZipArchive.h" | head -n 1 || true)"
+
+          if [ -n "${SSZIP_H1:-}" ] || [ -n "${SSZIP_H2:-}" ]; then
+            echo "✅ Found SSZipArchive headers in extracted tree."
+            # Copy the parent repo folder heuristically: the folder containing "SSZipArchive.h"
+            SRC_H="${SSZIP_H1:-$SSZIP_H2}"
+            # try to copy two levels up
+            SSZIP_BASE="$(cd "$(dirname "$SRC_H")/.." && pwd)"
+            rm -rf deps/SSZipArchive
+            mkdir -p deps/SSZipArchive
+            cp -R "$SSZIP_BASE"/* deps/SSZipArchive/ || true
+          else
+            echo "⚠️ SSZipArchive not found -> cloning SSZipArchive..."
+            rm -rf deps/SSZipArchive
+            git clone --depth=1 https://github.com/ZipArchive/ZipArchive.git deps/SSZipArchive
+          fi
+
+          # Create compatibility header path for: <SSZipArchive/ZipArchive.h>
+          # Some projects include ZipArchive.h; new repo uses SSZipArchive.h.
+          mkdir -p deps/SSZipArchive/SSZipArchive
+          if [ ! -f deps/SSZipArchive/SSZipArchive/ZipArchive.h ]; then
+            cat > deps/SSZipArchive/SSZipArchive/ZipArchive.h <<'EOF'
+          #pragma once
+          #import "SSZipArchive.h"
+          EOF
+          fi
+
+          # Ensure SSZipArchive.h exists somewhere; if not, fail early
+          SSZIP_MAIN_H="$(find deps/SSZipArchive -type f -name "SSZipArchive.h" | head -n 1 || true)"
+          if [ -z "${SSZIP_MAIN_H:-}" ]; then
+            echo "❌ SSZipArchive.h not found after fix."
+            find deps/SSZipArchive -maxdepth 4 -type f | head -n 200
+            exit 1
+          fi
+
+          echo "✅ SSZIP_MAIN_H=$SSZIP_MAIN_H"
+
+          echo "📌 Exact include dirs:"
+          echo "KITTY_INC_DIR=$KITTY_INC_DIR" >> "$GITHUB_ENV"
+          echo "SSZIP_INC_DIR=$(cd "$(dirname "$SSZIP_MAIN_H")/.." && pwd)" >> "$GITHUB_ENV"
+          echo "SSZIP_INC_SUB=$(cd "$(dirname "$SSZIP_MAIN_H")" && pwd)" >> "$GITHUB_ENV"
+
+          echo "---- deps tree (short) ----"
+          find deps -maxdepth 3 -type d -print
+
+      # 4) Setup Theos clean + fix SDK conflict + install deps (fmt)
+      - name: 4) Setup Theos (clean) + SDKs + brew deps
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$HOME/theos"
+          git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+
+          # ✅ Fix: sdk folder conflict
+          rm -rf "$HOME/theos/sdks"
+          git clone --depth=1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
+
+          # optional: remove older SDKs to speed up
+          rm -rf "$HOME/theos/sdks/iPhoneOS"{9..13}".sdk" || true
+
+          brew update
+          brew install ldid xz fmt
+
+          echo "✅ Theos + SDKs ready."
+
+      # 5) Delete old Makefile + generate NEW smart Makefile (exclude wrong stuff like example-android)
+      - name: 5) Delete old Makefile + generate NEW smart Makefile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+
           rm -f Makefile
 
-          echo "Generating Makefile..."
+          # Detect project source folder
+          if [ -d "src" ]; then
+            SRC_DIR="src"
+          elif [ -d "Tweak/src" ]; then
+            SRC_DIR="Tweak/src"
+          else
+            # fallback: find a folder containing Tweak.mm
+            TWEAKMM="$(find . -type f -name "Tweak.mm" | head -n 1 || true)"
+            if [ -z "${TWEAKMM:-}" ]; then
+              echo "❌ Can't locate src or Tweak.mm"
+              find . -maxdepth 4 -type f | head -n 200
+              exit 1
+            fi
+            SRC_DIR="$(dirname "$TWEAKMM")"
+          fi
 
-          echo "TARGET := iphone:clang:latest:14.0" > Makefile
-          echo "ARCHS := arm64 arm64e" >> Makefile
-          echo "THEOS_PACKAGE_SCHEME := rootless" >> Makefile
-          echo "" >> Makefile
-          echo "include \$(THEOS)/makefiles/common.mk" >> Makefile
-          echo "" >> Makefile
-          echo "TWEAK_NAME := UEDumper" >> Makefile
-          echo "" >> Makefile
-          echo "UEDumper_FILES := \\" >> Makefile
+          echo "✅ Using SRC_DIR=$SRC_DIR"
 
-          find . -type f \
-            \( -name '*.xm' -o -name '*.mm' -o -name '*.m' -o -name '*.cpp' \) \
-            -not -path './.theos/*' \
-            | sed 's|^\./||' \
-            | sort \
-            | while read f; do
-                echo "  $f \\" >> Makefile
+          # Build source file list (ONLY project src)
+          PROJ_FILES="$(find "$SRC_DIR" -type f \( -name '*.xm' -o -name '*.mm' -o -name '*.m' -o -name '*.cpp' \) | sed 's|^\./||')"
+
+          if [ -z "${PROJ_FILES:-}" ]; then
+            echo "❌ No source files found in $SRC_DIR"
+            exit 1
+          fi
+
+          # KittyMemory core only (exclude examples / android)
+          KITTY_CORE_FILES="$(find deps/KittyMemory -type f -name '*.cpp' \
+            ! -path '*example*' ! -path '*android*' ! -path '*windows*' ! -path '*linux*' \
+            | sed 's|^\./||' || true)"
+
+          # SSZipArchive .m/.mm (needed for symbols)
+          SSZIP_FILES="$(find deps/SSZipArchive -type f \( -name '*.m' -o -name '*.mm' \) \
+            ! -path '*Example*' ! -path '*Tests*' \
+            | sed 's|^\./||' || true)"
+
+          # fmt paths (brew on apple silicon = /opt/homebrew, intel = /usr/local)
+          if [ -d "/opt/homebrew/opt/fmt" ]; then
+            FMT_PREFIX="/opt/homebrew/opt/fmt"
+          else
+            FMT_PREFIX="/usr/local/opt/fmt"
+          fi
+
+          echo "✅ FMT_PREFIX=$FMT_PREFIX"
+
+          # Write Makefile with explicit file list (no wildcards that suck in android examples)
+          {
+            echo "TARGET := iphone:clang:latest:14.0"
+            echo "ARCHS := arm64"
+            echo "THEOS_PACKAGE_SCHEME := rootless"
+            echo ""
+            echo "include \$(THEOS)/makefiles/common.mk"
+            echo ""
+            echo "TWEAK_NAME := UEDumper"
+            echo ""
+            echo "UEDumper_FILES := \\"
+            # print each file as a Makefile-continued line
+            echo "$PROJ_FILES" | while IFS= read -r f; do
+              [ -n "$f" ] && echo "  $f \\"
+            done
+            if [ -n "${KITTY_CORE_FILES:-}" ]; then
+              echo "$KITTY_CORE_FILES" | while IFS= read -r f; do
+                [ -n "$f" ] && echo "  $f \\"
               done
+            fi
+            if [ -n "${SSZIP_FILES:-}" ]; then
+              echo "$SSZIP_FILES" | while IFS= read -r f; do
+                [ -n "$f" ] && echo "  $f \\"
+              done
+            fi
+            echo ""
+            echo "UEDumper_FRAMEWORKS := UIKit Foundation Security"
+            echo "UEDumper_LIBRARIES := c++"
+            echo ""
+            echo "UEDumper_CFLAGS += -fobjc-arc -Wno-error -Wno-deprecated-declarations -Wno-unused-variable"
+            echo "UEDumper_CCFLAGS += -std=c++17"
+            echo ""
+            echo "# Includes"
+            echo "UEDumper_CFLAGS += -I. -I$KITTY_INC_DIR -Ideps/KittyMemory -Ideps/SSZipArchive -Ideps/SSZipArchive/SSZipArchive -I$FMT_PREFIX/include"
+            echo "UEDumper_CCFLAGS += -I. -I$KITTY_INC_DIR -Ideps/KittyMemory -Ideps/SSZipArchive -Ideps/SSZipArchive/SSZipArchive -I$FMT_PREFIX/include"
+            echo ""
+            echo "# Link fmt"
+            echo "UEDumper_LDFLAGS += -L$FMT_PREFIX/lib -lfmt"
+            echo ""
+            echo "include \$(THEOS_MAKE_PATH)/tweak.mk"
+          } > Makefile
 
-          echo "" >> Makefile
-          echo "UEDumper_FRAMEWORKS := UIKit Foundation Security" >> Makefile
-          echo "UEDumper_CFLAGS += -fobjc-arc -Wno-error" >> Makefile
-          echo "UEDumper_CCFLAGS += -std=c++17" >> Makefile
-          echo "" >> Makefile
-          echo "include \$(THEOS_MAKE_PATH)/tweak.mk" >> Makefile
+          echo "✅ New Makefile generated."
+          echo "---- Makefile ----"
+          sed -n '1,200p' Makefile
 
-          echo "Makefile generated:"
-          sed -n '1,120p' Makefile
-
-      # --------------------------------------------------
-      # 5) Build
-      # --------------------------------------------------
-      - name: Build
+      # 6) Build package
+      - name: 6) Build (make package)
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           cd "$PROJECT_ROOT"
-          make clean || true
-          make package
 
-      # --------------------------------------------------
-      # 6) Upload result
-      # --------------------------------------------------
-      - name: Upload artifacts
+          make clean || true
+          make package FINALPACKAGE=1 messages=yes THEOS_PACKAGE_SCHEME=rootless
+
+      # 7) Upload artifacts
+      - name: 7) Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: UEDumper-output
+          name: Build_Output
           path: |
             ${{ env.PROJECT_ROOT }}/packages/*.deb
             ${{ env.PROJECT_ROOT }}/.theos/obj/**/*.dylib
