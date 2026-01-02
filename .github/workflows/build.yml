@@ -13,43 +13,47 @@ jobs:
       # 1. فك الضغط والبحث عن مكان الكود تلقائياً
       - name: Unzip and Find Source
         run: |
+          # فك الضغط عن أي ملف zip موجود
           unzip -o -q *.zip
           
-          # ابحث عن أي ملف ينتهي بـ .xm أو .mm لنعرف أين يوجد السورس
-          # وننتقل لهذا المجلد
-          SOURCE_FILE=$(find . -name "*.xm" -o -name "*.mm" | head -n 1)
+          # ابحث عن أي ملف ينتهي بـ .xm لنعرف أين يوجد مجلد المشروع الحقيقي
+          # هذا الأمر سيجد المسار الصحيح 100% مهما كان الاسم
+          SOURCE_FILE=$(find . -name "*.xm" | head -n 1)
+          
           if [ -z "$SOURCE_FILE" ]; then
-            echo "ERROR: No source code found!"
+            echo "ERROR: No source code (.xm file) found inside the zip!"
             exit 1
           fi
           
+          # استخراج اسم المجلد الذي يحتوي الملف
           PROJECT_DIR=$(dirname "$SOURCE_FILE")
-          echo "Found source code in: $PROJECT_DIR"
+          echo "✅ Found source code in: $PROJECT_DIR"
           
           # حفظ مسار المشروع لاستخدامه في الخطوات القادمة
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
 
-      # 2. تحميل المكتبات المطلوبة يدوياً (لضمان وجودها)
+      # 2. تحميل المكتبات المطلوبة يدوياً داخل مجلد المشروع
       - name: Force Install Dependencies
         run: |
           cd ${{ env.PROJECT_DIR }}
           mkdir -p deps
           
-          # مسح القديم وتحميل جديد نظيف
+          echo "⬇️ Downloading dependencies..."
           rm -rf deps/KittyMemory deps/fmt
           
           git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
           git clone --depth=1 https://github.com/fmtlib/fmt.git deps/fmt
 
-      # 3. كتابة ملف Makefile جديد (هنا السر: لن نعتمد على ملفك القديم)
+      # 3. كتابة ملف Makefile جديد (هنا الحل الجذري)
       - name: Generate Fresh Makefile
         run: |
           cd ${{ env.PROJECT_DIR }}
           
-          # حذف الـ Makefile القديم لتجنب المشاكل
+          echo "♻️ Deleting old Makefile..."
           rm -f Makefile
           
-          # كتابة ملف جديد يجمع كل الملفات الموجودة ويجهزها للحقن
+          echo "📝 Writing NEW Makefile..."
+          # نقوم بإنشاء ملف makefile بسيط ومباشر يجمع كل الملفات
           cat > Makefile <<EOF
           TARGET := iphone:clang:latest:14.0
           ARCHS = arm64
@@ -58,7 +62,7 @@ jobs:
 
           TWEAK_NAME = UEDumper
 
-          # جمع كل ملفات السورس تلقائياً
+          # جمع كل ملفات السورس (xm, mm, cpp) تلقائياً
           UEDumper_FILES = \$(wildcard *.xm) \$(wildcard *.mm) \$(wildcard *.cpp) \$(wildcard src/*.cpp) \$(wildcard src/*.mm)
           
           # إعدادات المكتبات (KittyMemory + fmt)
@@ -68,7 +72,7 @@ jobs:
           include \$(THEOS_MAKE_PATH)/tweak.mk
           EOF
           
-          echo "Created new Makefile content:"
+          echo "✅ New Makefile created:"
           cat Makefile
 
       # 4. تثبيت Theos
@@ -79,28 +83,31 @@ jobs:
           path: theos
           ref: master
 
-      # 5. البناء واستخراج Dylib
+      # 5. البناء واستخراج Dylib (للبدون جلبريك)
       - name: Build & Extract Dylib
         run: |
           export THEOS=$(pwd)/theos
           cd ${{ env.PROJECT_DIR }}
           
-          # تنظيف وبناء
+          echo "🚀 Building..."
           make clean
+          # رسائل الخطأ ستظهر بوضوح الآن إذا وجدت
           make package FINALPACKAGE=1 messages=yes
           
-          # تجهيز ملف Dylib للتحميل
+          # تجهيز مجلد للملفات الناتجة
           mkdir -p ../output
           
-          # نسخ ملف Dylib (المهم للحقن بدون جلبريك)
-          # نجده عادة في المجلد المخفي .theos/obj/debug/arm64/
+          echo "🔎 Hunting for the .dylib file..."
+          # البحث عن ملف dylib داخل مجلدات theos المخفية ونسخه
           find .theos -name "*.dylib" -exec cp {} ../output/UEDumper_NoJailbreak.dylib \;
           
-          # نسخ ملف DEB أيضاً
+          # نسخ ملف DEB أيضاً كاحتياط
           cp packages/*.deb ../output/ 2>/dev/null || true
+          
+          echo "✅ Files ready in output folder."
 
       - name: Upload Result
         uses: actions/upload-artifact@v4
         with:
-          name: UEDumper_File
+          name: UEDumper_NoJailbreak_File
           path: output/*
