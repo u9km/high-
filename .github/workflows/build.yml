@@ -1,4 +1,4 @@
-name: Ultimate UEDumper Builder (Fixed & No-Jailbreak)
+name: Ultimate UEDumper Builder (Fix dm.pl & No-Jailbreak)
 
 on:
   push:
@@ -12,11 +12,18 @@ jobs:
       - name: 1. Checkout Code
         uses: actions/checkout@v4
 
-      # 1) فك الضغط والبحث عن المشروع مهما كان مكان الملفات
-      - name: 2. Smart Unzip & Locate
+      # 1) تثبيت أدوات النظام الضرورية لحل مشكلة dm.pl
+      - name: 2. Install System Tools (Fix dm.pl)
+        run: |
+          brew update
+          # تثبيت dpkg هو الحل الجذري لرسالة الخطأ التي تظهر في الصورة
+          brew install ldid dpkg make 
+
+      # 2) فك الضغط والبحث الذكي عن مجلد المشروع
+      - name: 3. Smart Unzip & Locate
         run: |
           find . -name "*.zip" -exec unzip -o -q {} \;
-          # البحث عن أي ملف كود برمجي لتحديد مجلد المشروع
+          # البحث عن أي ملف برمجي لتحديد مجلد المشروع (cpp, mm, xm)
           SOURCE_FILE=$(find . -type f \( -name "*.xm" -o -name "*.mm" -o -name "*.cpp" -o -name "*.c" \) | head -n 1)
           if [ -z "$SOURCE_FILE" ]; then
             echo "::error::لم يتم العثور على سورس كود داخل الملف!"
@@ -26,13 +33,7 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
           echo "✅ Project found in: $PROJECT_DIR"
 
-      # 2) حل مشكلة dm.pl وتثبيت أدوات النظام
-      - name: 3. Install System Tools (Fix dm.pl)
-        run: |
-          brew update
-          brew install ldid dpkg make  # تثبيت dpkg ضروري لصناعة الحزمة
-
-      # 3) تحميل المكتبات الضرورية تلقائياً
+      # 3) تحميل المكتبات الضرورية (KittyMemory, fmt, Keystone)
       - name: 4. Install Dependencies
         run: |
           cd ${{ env.PROJECT_DIR }}
@@ -41,13 +42,12 @@ jobs:
           git clone --depth=1 https://github.com/fmtlib/fmt.git deps/fmt
           git clone --depth=1 https://github.com/keystone-engine/keystone.git deps/keystone
 
-      # 4) كتابة Makefile جديد و ملف Control لضمان نجاح البناء
+      # 4) إعادة كتابة Makefile و Control لضمان البناء الصحيح
       - name: 5. Generate Build Configs
         run: |
           cd ${{ env.PROJECT_DIR }}
-          rm -f Makefile control # حذف القديم للاستبدال
+          rm -f Makefile control
           
-          # إنشاء Makefile يربط كل المكتبات
           cat > Makefile <<EOF
           TARGET := iphone:clang:latest:14.0
           ARCHS = arm64
@@ -59,7 +59,6 @@ jobs:
           include \$(THEOS_MAKE_PATH)/tweak.mk
           EOF
 
-          # إنشاء ملف Control (ضروري لتجنب أخطاء البناء)
           cat > control <<EOF
           Package: com.uedumper.ios
           Name: UEDumper
@@ -71,7 +70,7 @@ jobs:
           Section: Tweaks
           EOF
 
-      # 5) إعداد Theos
+      # 5) إعداد بيئة Theos
       - name: 6. Setup Theos
         uses: actions/checkout@v4
         with:
@@ -79,18 +78,20 @@ jobs:
           path: theos
           ref: master
 
-      # 6) البناء النهائي واستخراج الـ Dylib (للحقن بدون جلبريك)
+      # 6) البناء واستخراج الـ Dylib للحقن (بدون جلبريك)
       - name: 7. Build & Extract Result
         run: |
           export THEOS=$(pwd)/theos
+          export PATH=$THEOS/bin:$PATH
           cd ${{ env.PROJECT_DIR }}
           make clean
+          # تفعيل خيار FINALPACKAGE لتقليل حجم الملف الناتج
           make package FINALPACKAGE=1 messages=yes
           
           mkdir -p ../FINAL_OUT
-          # استخراج ملف dylib الصافي للحقن اليدوي (بدون جلبريك)
+          # استخراج ملف الـ dylib الصافي المطلوب للحقن اليدوي
           find .theos/obj -name "*.dylib" -exec cp {} ../FINAL_OUT/UEDumper_Injection.dylib \;
-          # نسخ ملف DEB كاحتياط
+          # نسخ ملف الـ DEB الناتج أيضاً
           cp packages/*.deb ../FINAL_OUT/ 2>/dev/null || true
 
       - name: 8. Upload Result
