@@ -1,26 +1,25 @@
-name: Build UEDumper (Non-Jailbreak)
+name: Debug Build UEDumper
 
 on:
-  workflow_dispatch: # زر التشغيل اليدوي
+  workflow_dispatch:
 
 jobs:
-  build:
+  debug-build:
     runs-on: macos-latest
 
     steps:
-      # 1. تحميل الملفات (بما في ذلك الملف المضغوط)
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # 2. فك الضغط عن الملف (هذه الخطوة كانت ناقصة وتسببت بالمشكلة)
-      - name: Unzip Project
+      - name: Unzip and LIST FILES (Debug Step)
         run: |
-          echo "Starting Unzip..."
+          echo ">>> Unzipping..."
           unzip iOS_UEDumper-main.zip
-          echo "Unzip Done. Listing files to confirm folder name:"
-          ls -F # لعرض المجلدات الناتجة للتأكد
+          
+          echo ">>> SHOWING FILE STRUCTURE (ابحث عن Makefile هنا):"
+          # هذا الأمر سيعرض كل الملفات والمجلدات لنعرف المسار الصحيح
+          find . -maxdepth 3 -not -path '*/.*'
 
-      # 3. تثبيت Theos (أداة البناء)
       - name: Setup Theos
         uses: actions/checkout@v4
         with:
@@ -28,22 +27,17 @@ jobs:
           path: theos
           ref: master
 
-      # 4. بناء المشروع (مع الدخول للمجلد الصحيح)
-      - name: Build Package
+      - name: Build with Verbose Logs
         run: |
           export THEOS=$(pwd)/theos
           
-          # ندخل للمجلد الذي نتج عن فك الضغط
+          # ملاحظة: إذا أظهرت الخطوة السابقة أن المجلد اسمه مختلف، عدل هذا السطر
           cd iOS_UEDumper-main
           
-          # أمر البناء. الخيار FINALPACKAGE=1 مهم لتقليل حجم الملف وتحسين الأداء
-          # هذا سينتج ملف DEB
-          make package FINALPACKAGE=1
-
-      # 5. رفع الملف الناتج
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: UEDumper-Tweak
-          # المسار للملف الناتج داخل المجلد المفكوك
-          path: iOS_UEDumper-main/packages/*.deb
+          echo ">>> Checking if Makefile exists here..."
+          ls -la Makefile
+          
+          echo ">>> Starting Build with FULL LOGS..."
+          # messages=yes: يظهر تفاصيل الخطأ البرمجي
+          # debug=0: بما أنك تريده بدون جلبريك يفضل عدم تفعيل وضع الديباج الخاص بالمطورين لتقليل الحجم، لكن سنبقيه 0
+          make package FINALPACKAGE=1 messages
