@@ -1,4 +1,4 @@
-name: Build Theos Tweak from ZIP (Auto Fix Deps + Smart Makefile)
+name: Smart Theos Build (Zip Auto-Find + Auto-Deps + Auto-Makefile)
 
 on:
   push:
@@ -15,7 +15,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1) Unzip zip(s) into _extract and print tree
+      # ------------------------------------------------------------
+      # 1) Extract ALL zip(s) into _extract + print full tree
+      # ------------------------------------------------------------
       - name: 1) Unzip zip(s) + print full tree
         shell: bash
         run: |
@@ -27,46 +29,62 @@ jobs:
           echo "🔎 Searching for zip files in repo root..."
           ls -la
 
-          ZIP_COUNT="$(find . -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')"
-          if [ "$ZIP_COUNT" = "0" ]; then
-            echo "❌ No .zip found in repo root."
-            exit 1
-          fi
-
-          echo "📦 Unzipping all zip files into _extract/ ..."
+          ZIPS_FOUND=0
           for z in *.zip; do
-            [ -f "$z" ] || continue
-            echo "  -> $z"
-            unzip -o -q "$z" -d _extract
+            if [ -f "$z" ]; then
+              ZIPS_FOUND=1
+              echo "📦 Unzipping: $z -> _extract/"
+              unzip -o -q "$z" -d _extract
+            fi
           done
 
-          echo "✅ Top tree:"
-          find _extract -maxdepth 4 -type d -print
+          if [ "$ZIPS_FOUND" -eq 0 ]; then
+            echo "⚠️ No zip files found in repo root. Using repository files as-is."
+            # لو ماكو zip، نعتبر الجذر هو نفسه
+            rm -rf _extract
+            mkdir -p _extract
+            rsync -a ./ _extract/ --exclude _extract --exclude .git --exclude .github
+          fi
 
-      # 2) Locate PROJECT_ROOT (folder containing Makefile + src)
+          echo "✅ FULL TREE (first 400 lines):"
+          (cd _extract && find . -maxdepth 8 -print | sed -n '1,400p')
+
+      # ------------------------------------------------------------
+      # 2) Locate PROJECT_ROOT automatically (Tweak folder)
+      # ------------------------------------------------------------
       - name: 2) Locate PROJECT_ROOT (auto)
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "🔍 Finding Makefile inside _extract ..."
-          MF="$(find _extract -type f -name Makefile | head -n 1 || true)"
-          if [ -z "${MF:-}" ]; then
-            echo "❌ Makefile not found after unzip."
-            echo "📌 Showing some files:"
-            find _extract -maxdepth 5 -type f | head -n 200
+          # نعتبر المشروع هو المجلد الذي يحتوي Makefile أو control أو Tweak.xm/.mm
+          CANDIDATE="$(
+            find _extract -type f \( \
+              -name "Makefile" -o \
+              -name "control" -o \
+              -name "Tweak.xm" -o -name "Tweak.mm" -o -name "Tweak.m" \
+            \) | head -n 1
+          )"
+
+          if [ -z "${CANDIDATE:-}" ]; then
+            echo "❌ Could not locate project root (no Makefile/control/Tweak.* found)."
+            echo "👉 اطبع الشجرة وشوف وين ملفات Tweak/Makefile/control داخل zip."
             exit 1
           fi
 
-          PROJECT_ROOT="$(cd "$(dirname "$MF")" && pwd)"
-          echo "✅ PROJECT_ROOT=$PROJECT_ROOT"
+          PROJECT_ROOT="$(dirname "$CANDIDATE")"
+          # لو كان الملف داخل src/ نطلع خطوة
+          if [ "$(basename "$PROJECT_ROOT")" = "src" ]; then
+            PROJECT_ROOT="$(dirname "$PROJECT_ROOT")"
+          fi
+
+          echo "✅ PROJECT_ROOT = $PROJECT_ROOT"
           echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
 
-          echo "📌 PROJECT_ROOT listing:"
-          ls -la "$PROJECT_ROOT"
-
-      # 3) Fix deps (KittyMemory + SSZipArchive) by searching inside extracted tree, else clone
-      - name: 3) Fix deps (KittyMemory + SSZipArchive) and print exact include dirs
+      # ------------------------------------------------------------
+      # 3) Fix deps: KittyMemory + SSZipArchive + fmt (+ Keystone fix flags)
+      # ------------------------------------------------------------
+      - name: 3) Fix deps (KittyMemory + SSZipArchive + fmt) + print include dirs
         shell: bash
         run: |
           set -euo pipefail
@@ -74,218 +92,193 @@ jobs:
 
           mkdir -p deps
 
-          echo "🔎 Searching for KittyInclude.hpp inside extracted content..."
-          KITTY_HEADER="$(find "$(dirname "$PROJECT_ROOT")" -type f -name "KittyInclude.hpp" | head -n 1 || true)"
-
-          if [ -n "${KITTY_HEADER:-}" ]; then
-            echo "✅ Found KittyInclude.hpp at: $KITTY_HEADER"
-            # usually .../KittyMemory/KittyMemory/KittyInclude.hpp
-            KITTY_BASE="$(cd "$(dirname "$KITTY_HEADER")/.." && pwd)"
-            # ensure it contains KittyMemory folder
-            rm -rf deps/KittyMemory
-            mkdir -p deps/KittyMemory
-            cp -R "$KITTY_BASE"/* deps/KittyMemory/ || true
-          else
+          # ---------- KittyMemory ----------
+          KITTY_HDR="$(find .. -type f -name "KittyInclude.hpp" 2>/dev/null | head -n 1 || true)"
+          if [ -z "${KITTY_HDR:-}" ]; then
             echo "⚠️ KittyInclude.hpp not found -> cloning KittyMemory..."
             rm -rf deps/KittyMemory
             git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
-          fi
-
-          # Find exact include dir for KittyInclude.hpp
-          KITTY_INC_DIR="$(find deps/KittyMemory -type f -name "KittyInclude.hpp" -print | head -n 1 | xargs dirname)"
-          if [ -z "${KITTY_INC_DIR:-}" ]; then
-            echo "❌ KittyInclude.hpp still not found after fix."
-            find deps/KittyMemory -maxdepth 4 -type f | head -n 200
-            exit 1
-          fi
-          echo "✅ KITTY_INC_DIR=$KITTY_INC_DIR"
-
-          echo "🔎 Searching for SSZipArchive headers inside extracted content..."
-          # We accept SSZipArchive.h or ZipArchive.h
-          SSZIP_H1="$(find "$(dirname "$PROJECT_ROOT")" -type f -name "SSZipArchive.h" | head -n 1 || true)"
-          SSZIP_H2="$(find "$(dirname "$PROJECT_ROOT")" -type f -name "ZipArchive.h" | head -n 1 || true)"
-
-          if [ -n "${SSZIP_H1:-}" ] || [ -n "${SSZIP_H2:-}" ]; then
-            echo "✅ Found SSZipArchive headers in extracted tree."
-            # Copy the parent repo folder heuristically: the folder containing "SSZipArchive.h"
-            SRC_H="${SSZIP_H1:-$SSZIP_H2}"
-            # try to copy two levels up
-            SSZIP_BASE="$(cd "$(dirname "$SRC_H")/.." && pwd)"
-            rm -rf deps/SSZipArchive
-            mkdir -p deps/SSZipArchive
-            cp -R "$SSZIP_BASE"/* deps/SSZipArchive/ || true
+            KITTY_HDR="$(find deps/KittyMemory -type f -name "KittyInclude.hpp" | head -n 1)"
           else
-            echo "⚠️ SSZipArchive not found -> cloning SSZipArchive..."
+            echo "✅ Found KittyInclude.hpp at: $KITTY_HDR"
+            # ننقل/ننسخ المكتبة إلى deps/KittyMemory لو كانت خارجها
+            if ! echo "$KITTY_HDR" | grep -q "/deps/KittyMemory/"; then
+              echo "📦 Copying KittyMemory into deps/KittyMemory ..."
+              rm -rf deps/KittyMemory
+              mkdir -p deps/KittyMemory
+              # نأخذ المجلد الأعلى اللي يحتوي KittyInclude.hpp
+              KITTY_DIR="$(dirname "$KITTY_HDR")"
+              cp -R "$KITTY_DIR"/* deps/KittyMemory/ || true
+            fi
+          fi
+
+          # استخرج مسار include الصح (غالباً KittyMemory/KittyMemory)
+          KITTY_INC_DIR="$(dirname "$(find deps/KittyMemory -type f -name 'KittyInclude.hpp' | head -n 1)")"
+          echo "✅ KITTY_INC_DIR=$KITTY_INC_DIR"
+          echo "KITTY_INC_DIR=$KITTY_INC_DIR" >> "$GITHUB_ENV"
+
+          # ---------- SSZipArchive ----------
+          SSZIP_HDR="$(find .. -type f -path "*SSZipArchive*" -name "ZipArchive.h" 2>/dev/null | head -n 1 || true)"
+          if [ -z "${SSZIP_HDR:-}" ]; then
+            echo "⚠️ SSZipArchive/ZipArchive.h not found -> cloning SSZipArchive..."
             rm -rf deps/SSZipArchive
             git clone --depth=1 https://github.com/ZipArchive/ZipArchive.git deps/SSZipArchive
+            # Header location varies; we will include the repo root
+          else
+            echo "✅ Found ZipArchive.h at: $SSZIP_HDR"
+            if ! echo "$SSZIP_HDR" | grep -q "/deps/SSZipArchive/"; then
+              echo "📦 Copying SSZipArchive into deps/SSZipArchive ..."
+              rm -rf deps/SSZipArchive
+              mkdir -p deps/SSZipArchive
+              SSZIP_DIR="$(dirname "$SSZIP_HDR")"
+              cp -R "$SSZIP_DIR"/.. deps/SSZipArchive/ || true
+            fi
           fi
+          echo "SSZIP_DIR=deps/SSZipArchive" >> "$GITHUB_ENV"
 
-          # Create compatibility header path for: <SSZipArchive/ZipArchive.h>
-          # Some projects include ZipArchive.h; new repo uses SSZipArchive.h.
-          mkdir -p deps/SSZipArchive/SSZipArchive
-          if [ ! -f deps/SSZipArchive/SSZipArchive/ZipArchive.h ]; then
-            cat > deps/SSZipArchive/SSZipArchive/ZipArchive.h <<'EOF'
-          #pragma once
-          #import "SSZipArchive.h"
-          EOF
-          fi
+          # ---------- fmt ----------
+          echo "🍺 Installing fmt (brew)..."
+          brew update >/dev/null 2>&1 || true
+          brew install fmt >/dev/null
 
-          # Ensure SSZipArchive.h exists somewhere; if not, fail early
-          SSZIP_MAIN_H="$(find deps/SSZipArchive -type f -name "SSZipArchive.h" | head -n 1 || true)"
-          if [ -z "${SSZIP_MAIN_H:-}" ]; then
-            echo "❌ SSZipArchive.h not found after fix."
-            find deps/SSZipArchive -maxdepth 4 -type f | head -n 200
+          FMT_PREFIX="$(brew --prefix fmt)"
+          echo "✅ FMT_PREFIX=$FMT_PREFIX"
+          echo "FMT_PREFIX=$FMT_PREFIX" >> "$GITHUB_ENV"
+
+          echo "✅ Include dirs summary:"
+          echo "  - KITTY_INC_DIR: $KITTY_INC_DIR"
+          echo "  - SSZIP_DIR   : deps/SSZipArchive"
+          echo "  - FMT_PREFIX  : $FMT_PREFIX"
+
+      # ------------------------------------------------------------
+      # 4) Delete old Makefile + generate a NEW smart Makefile
+      #    - excludes KittyMemory examples (android etc)
+      #    - adds include flags for Kitty + SSZipArchive + fmt
+      #    - Keystone fix: -fno-modules + -Wno-module-import-in-extern-c
+      # ------------------------------------------------------------
+      - name: 4) Delete old Makefile + generate NEW smart Makefile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_ROOT"
+
+          echo "🧹 Removing old Makefile (if any)..."
+          rm -f Makefile
+
+          TWEAK_NAME="UEDumper"
+
+          echo "🔎 Collecting project source files (excluding deps examples/.theos)..."
+          # نلتقط ملفات المشروع فقط + ملفات KittyMemory الأساسية (بدون examples)
+          SRC_LIST="$(
+            find . -type f \( -name "*.xm" -o -name "*.mm" -o -name "*.m" -o -name "*.cpp" \) \
+              -not -path "./.theos/*" \
+              -not -path "./deps/KittyMemory/example-android/*" \
+              -not -path "./deps/KittyMemory/examples/*" \
+              -not -path "./deps/KittyMemory/example/*" \
+              -not -path "./deps/SSZipArchive/*Tests/*" \
+              -print \
+            | sed 's|^\./||'
+          )"
+
+          if [ -z "${SRC_LIST:-}" ]; then
+            echo "❌ No source files found in PROJECT_ROOT."
             exit 1
           fi
 
-          echo "✅ SSZIP_MAIN_H=$SSZIP_MAIN_H"
+          echo "✅ Found $(echo "$SRC_LIST" | wc -l | tr -d ' ') source files."
 
-          echo "📌 Exact include dirs:"
-          echo "KITTY_INC_DIR=$KITTY_INC_DIR" >> "$GITHUB_ENV"
-          echo "SSZIP_INC_DIR=$(cd "$(dirname "$SSZIP_MAIN_H")/.." && pwd)" >> "$GITHUB_ENV"
-          echo "SSZIP_INC_SUB=$(cd "$(dirname "$SSZIP_MAIN_H")" && pwd)" >> "$GITHUB_ENV"
+          # صياغة ملفات Theos: كل سطر " \"
+          FILES_FMT=""
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            FILES_FMT="${FILES_FMT}\n  ${f} \\"
+          done <<< "$SRC_LIST"
 
-          echo "---- deps tree (short) ----"
-          find deps -maxdepth 3 -type d -print
+          # احذف آخر "\" (اختياري، مو لازم بس أنظف)
+          FILES_FMT="$(printf "%b" "$FILES_FMT" | sed '$ s/ \\$//')"
 
-      # 4) Setup Theos clean + fix SDK conflict + install deps (fmt)
-      - name: 4) Setup Theos (clean) + SDKs + brew deps
+          cat > Makefile <<EOF
+          TARGET := iphone:clang:latest:14.0
+          ARCHS := arm64 arm64e
+          THEOS_PACKAGE_SCHEME := rootless
+
+          include \$(THEOS)/makefiles/common.mk
+
+          TWEAK_NAME := ${TWEAK_NAME}
+
+          ${TWEAK_NAME}_FILES :=${FILES_FMT}
+
+          ${TWEAK_NAME}_FRAMEWORKS := UIKit Foundation Security
+          ${TWEAK_NAME}_LIBRARIES := stdc++
+
+          # ---- includes ----
+          KITTY_INC := ${KITTY_INC_DIR}
+          SSZIP_INC := deps/SSZipArchive
+          FMT_INC   := ${FMT_PREFIX}/include
+          FMT_LIB   := ${FMT_PREFIX}/lib
+
+          # Keystone/modules fix + general fixes
+          COMMON_FIX := -fno-modules -Wno-module-import-in-extern-c -Wno-error -Wno-deprecated-declarations -Wno-unused-variable -Wno-unused-parameter
+
+          ${TWEAK_NAME}_CFLAGS   += \$(COMMON_FIX) -fobjc-arc -I. -I\$(KITTY_INC) -I\$(SSZIP_INC) -I\$(FMT_INC)
+          ${TWEAK_NAME}_CCFLAGS  += \$(COMMON_FIX) -std=c++17 -I. -I\$(KITTY_INC) -I\$(SSZIP_INC) -I\$(FMT_INC)
+          ${TWEAK_NAME}_LDFLAGS  += -L\$(FMT_LIB) -lfmt
+
+          include \$(THEOS_MAKE_PATH)/tweak.mk
+          EOF
+
+          echo "✅ New Makefile generated."
+          echo "---- Makefile (first 200 lines) ----"
+          sed -n '1,200p' Makefile
+
+      # ------------------------------------------------------------
+      # 5) Setup Theos clean + SDKs (fix sdks exists error)
+      # ------------------------------------------------------------
+      - name: 5) Setup Theos (clean) + SDKs
         shell: bash
         run: |
           set -euo pipefail
 
           rm -rf "$HOME/theos"
           git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
+
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/bin" >> "$GITHUB_PATH"
 
-          # ✅ Fix: sdk folder conflict
+          # FIX: sdks already exists
           rm -rf "$HOME/theos/sdks"
           git clone --depth=1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
 
           # optional: remove older SDKs to speed up
           rm -rf "$HOME/theos/sdks/iPhoneOS"{9..13}".sdk" || true
 
-          brew update
-          brew install ldid xz fmt
+          brew install ldid xz >/dev/null
 
-          echo "✅ Theos + SDKs ready."
-
-      # 5) Delete old Makefile + generate NEW smart Makefile (exclude wrong stuff like example-android)
-      - name: 5) Delete old Makefile + generate NEW smart Makefile
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$PROJECT_ROOT"
-
-          rm -f Makefile
-
-          # Detect project source folder
-          if [ -d "src" ]; then
-            SRC_DIR="src"
-          elif [ -d "Tweak/src" ]; then
-            SRC_DIR="Tweak/src"
-          else
-            # fallback: find a folder containing Tweak.mm
-            TWEAKMM="$(find . -type f -name "Tweak.mm" | head -n 1 || true)"
-            if [ -z "${TWEAKMM:-}" ]; then
-              echo "❌ Can't locate src or Tweak.mm"
-              find . -maxdepth 4 -type f | head -n 200
-              exit 1
-            fi
-            SRC_DIR="$(dirname "$TWEAKMM")"
-          fi
-
-          echo "✅ Using SRC_DIR=$SRC_DIR"
-
-          # Build source file list (ONLY project src)
-          PROJ_FILES="$(find "$SRC_DIR" -type f \( -name '*.xm' -o -name '*.mm' -o -name '*.m' -o -name '*.cpp' \) | sed 's|^\./||')"
-
-          if [ -z "${PROJ_FILES:-}" ]; then
-            echo "❌ No source files found in $SRC_DIR"
-            exit 1
-          fi
-
-          # KittyMemory core only (exclude examples / android)
-          KITTY_CORE_FILES="$(find deps/KittyMemory -type f -name '*.cpp' \
-            ! -path '*example*' ! -path '*android*' ! -path '*windows*' ! -path '*linux*' \
-            | sed 's|^\./||' || true)"
-
-          # SSZipArchive .m/.mm (needed for symbols)
-          SSZIP_FILES="$(find deps/SSZipArchive -type f \( -name '*.m' -o -name '*.mm' \) \
-            ! -path '*Example*' ! -path '*Tests*' \
-            | sed 's|^\./||' || true)"
-
-          # fmt paths (brew on apple silicon = /opt/homebrew, intel = /usr/local)
-          if [ -d "/opt/homebrew/opt/fmt" ]; then
-            FMT_PREFIX="/opt/homebrew/opt/fmt"
-          else
-            FMT_PREFIX="/usr/local/opt/fmt"
-          fi
-
-          echo "✅ FMT_PREFIX=$FMT_PREFIX"
-
-          # Write Makefile with explicit file list (no wildcards that suck in android examples)
-          {
-            echo "TARGET := iphone:clang:latest:14.0"
-            echo "ARCHS := arm64"
-            echo "THEOS_PACKAGE_SCHEME := rootless"
-            echo ""
-            echo "include \$(THEOS)/makefiles/common.mk"
-            echo ""
-            echo "TWEAK_NAME := UEDumper"
-            echo ""
-            echo "UEDumper_FILES := \\"
-            # print each file as a Makefile-continued line
-            echo "$PROJ_FILES" | while IFS= read -r f; do
-              [ -n "$f" ] && echo "  $f \\"
-            done
-            if [ -n "${KITTY_CORE_FILES:-}" ]; then
-              echo "$KITTY_CORE_FILES" | while IFS= read -r f; do
-                [ -n "$f" ] && echo "  $f \\"
-              done
-            fi
-            if [ -n "${SSZIP_FILES:-}" ]; then
-              echo "$SSZIP_FILES" | while IFS= read -r f; do
-                [ -n "$f" ] && echo "  $f \\"
-              done
-            fi
-            echo ""
-            echo "UEDumper_FRAMEWORKS := UIKit Foundation Security"
-            echo "UEDumper_LIBRARIES := c++"
-            echo ""
-            echo "UEDumper_CFLAGS += -fobjc-arc -Wno-error -Wno-deprecated-declarations -Wno-unused-variable"
-            echo "UEDumper_CCFLAGS += -std=c++17"
-            echo ""
-            echo "# Includes"
-            echo "UEDumper_CFLAGS += -I. -I$KITTY_INC_DIR -Ideps/KittyMemory -Ideps/SSZipArchive -Ideps/SSZipArchive/SSZipArchive -I$FMT_PREFIX/include"
-            echo "UEDumper_CCFLAGS += -I. -I$KITTY_INC_DIR -Ideps/KittyMemory -Ideps/SSZipArchive -Ideps/SSZipArchive/SSZipArchive -I$FMT_PREFIX/include"
-            echo ""
-            echo "# Link fmt"
-            echo "UEDumper_LDFLAGS += -L$FMT_PREFIX/lib -lfmt"
-            echo ""
-            echo "include \$(THEOS_MAKE_PATH)/tweak.mk"
-          } > Makefile
-
-          echo "✅ New Makefile generated."
-          echo "---- Makefile ----"
-          sed -n '1,200p' Makefile
-
+      # ------------------------------------------------------------
       # 6) Build package
-      - name: 6) Build (make package)
+      # ------------------------------------------------------------
+      - name: 6) Build (package)
         shell: bash
         run: |
           set -euo pipefail
           cd "$PROJECT_ROOT"
 
+          echo "🚀 Building..."
           make clean || true
           make package FINALPACKAGE=1 messages=yes THEOS_PACKAGE_SCHEME=rootless
 
-      # 7) Upload artifacts
+          echo "✅ Build output:"
+          ls -la packages || true
+          find .theos -maxdepth 4 -type f -name "*.dylib" -print || true
+
+      # ------------------------------------------------------------
+      # 7) Upload artifacts (deb + dylib if exists)
+      # ------------------------------------------------------------
       - name: 7) Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Build_Output
           path: |
             ${{ env.PROJECT_ROOT }}/packages/*.deb
-            ${{ env.PROJECT_ROOT }}/.theos/obj/**/*.dylib
+            ${{ env.PROJECT_ROOT }}/.theos/**/**/*.dylib
+          
