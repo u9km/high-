@@ -1,4 +1,4 @@
-name: Fixed Non-Jailbreak Build
+name: Final A-Z Build (Fix dm.pl & sdks)
 
 on:
   push:
@@ -12,13 +12,13 @@ jobs:
       - name: 1. Checkout Code
         uses: actions/checkout@v4
 
-      # 1) تثبيت الأدوات الضرورية فقط
-      - name: 2. Install Tools
+      # حل مشكلة dm.pl: تثبيت الأدوات الضرورية يدوياً
+      - name: 2. Install System Tools (dpkg & ldid)
         run: |
           brew update
-          brew install ldid dpkg  # تثبيت dpkg كاحتياط لتجاوز أي فحص داخلي
+          brew install ldid dpkg make 
 
-      # 2) فك الضغط والبحث عن المشروع
+      # فك الضغط والبحث الذكي عن المشروع لتجنب خطأ "لم يتم العثور على ملفات"
       - name: 3. Smart Unzip & Locate
         run: |
           find . -name "*.zip" -exec unzip -o -q {} \;
@@ -29,25 +29,40 @@ jobs:
           fi
           PROJECT_DIR=$(dirname "$SOURCE_FILE")
           echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "✅ Found project in: $PROJECT_DIR"
 
-      # 3) إعداد Theos والمكتبات
-      - name: 4. Setup Theos & Dependencies
+      # إعداد Theos مع حل مشكلة المجلد الموجود مسبقاً (SDKS)
+      - name: 4. Setup Theos & SDKs
         run: |
-          git clone --recursive https://github.com/theos/theos.git ~/theos
-          git clone --depth=1 https://github.com/theos/sdks.git ~/theos/sdks
-          echo "THEOS=~/theos" >> $GITHUB_ENV
-          echo "~/theos/bin" >> $GITHUB_PATH
+          export THEOS=~/theos
+          if [ ! -d "$THEOS" ]; then
+            git clone --recursive https://github.com/theos/theos.git $THEOS
+          fi
           
+          # تحميل الـ SDKs فقط إذا كان المجلد فارغاً لتجنب خطأ Exit Code 128
+          mkdir -p $THEOS/sdks
+          if [ -z "$(ls -A $THEOS/sdks)" ]; then
+            git clone --depth=1 https://github.com/theos/sdks.git $THEOS/sdks
+          fi
+          
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "$THEOS/bin" >> $GITHUB_PATH
+
+      # تحميل المكتبات (KittyMemory, fmt)
+      - name: 5. Install Dependencies
+        run: |
           cd ${{ env.PROJECT_DIR }}
           mkdir -p deps
           git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
           git clone --depth=1 https://github.com/fmtlib/fmt.git deps/fmt
 
-      # 4) كتابة Makefile مخصص للحقن (بدون حزمة جلبريك)
-      - name: 5. Force New Makefile
+      # بناء ملف الـ Dylib المباشر (تجاوز خطأ التغليف كـ Deb)
+      - name: 6. Build Dylib
         run: |
+          export THEOS=~/theos
           cd ${{ env.PROJECT_DIR }}
-          rm -f Makefile
+          
+          # إنشاء Makefile نظيف إذا لزم الأمر لضمان المسارات
           cat > Makefile <<EOF
           TARGET := iphone:clang:latest:14.0
           ARCHS = arm64
@@ -59,25 +74,20 @@ jobs:
           include \$(THEOS_MAKE_PATH)/tweak.mk
           EOF
 
-      # 5) البناء المباشر (تجاوز خطأ dm.pl نهائياً)
-      - name: 6. Run Build
-        run: |
-          export THEOS=~/theos
-          cd ${{ env.PROJECT_DIR }}
-          # السر هنا: نستخدم make فقط وليس make package
-          # هذا سيقوم بالترجمة فقط وينتج ملف dylib
+          # تنفيذ البناء
           make FINALPACKAGE=1 messages=yes
 
-      # 6) استخراج الملف الناتج للتحميل
+      # استخراج الملفات النهائية للتحميل
       - name: 7. Extract & Upload
         run: |
-          mkdir -p final_output
-          # البحث عن ملف الـ dylib في مجلدات البناء ونسخه
-          find .theos/obj -name "*.dylib" -exec cp {} final_output/UEDumper_Ready.dylib \;
-          ls -la final_output
-      
+          mkdir -p output
+          # البحث عن ملف الـ dylib الناتج ونسخه
+          find . -name "*.dylib" -exec cp {} output/UEDumper_Ready.dylib \;
+          # البحث عن ملف الـ deb إذا نجح إنتاجه
+          find packages -name "*.deb" -exec cp {} output/ 2>/dev/null || true
+          
       - name: 8. Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: UEDumper_NonJailbreak_Dylib
-          path: final_output/UEDumper_Ready.dylib
+          name: UEDumper_NonJailbreak_Build
+          path: output/*
