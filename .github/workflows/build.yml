@@ -1,251 +1,119 @@
-name: Theos Build (Zip Project Auto-Fix)
+name: iOS UEDumper Build (SAFE)
 
 on:
   push:
-    branches: ["**"]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # ------------------------------------------------------------
-      # 1) Unzip: يفك أي zip موجود بالجذر إلى _extract ويطبع شجرة الملفات
-      # ------------------------------------------------------------
-      - name: 1) Unzip zip(s) + print full tree
+      # --------------------------------------------------
+      # 1) Unzip project
+      # --------------------------------------------------
+      - name: Unzip project zip
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
           rm -rf _extract
-          mkdir -p _extract
+          mkdir _extract
+          unzip -o *.zip -d _extract
+          echo "Extracted tree:"
+          find _extract -maxdepth 3 -type d
 
-          echo "🔎 Searching for zip files in repo root..."
-          ls -la
-          shopt -s nullglob
-          ZIPS=( *.zip )
-          if [ ${#ZIPS[@]} -eq 0 ]; then
-            echo "❌ No zip found in repo root."
-            exit 1
-          fi
-
-          for z in "${ZIPS[@]}"; do
-            echo "📦 Unzipping: $z"
-            unzip -o -q "$z" -d _extract
-          done
-
-          echo "✅ Extracted tree (depth 6):"
-          find _extract -maxdepth 6 -print
-
-      # ------------------------------------------------------------
-      # 2) Locate PROJECT_ROOT: يبحث عن ملف Tweak (xm/mm) ويحدد مجلد المشروع
-      # ------------------------------------------------------------
-      - name: 2) Locate PROJECT_ROOT (auto)
+      # --------------------------------------------------
+      # 2) Locate PROJECT_ROOT
+      # --------------------------------------------------
+      - name: Locate PROJECT_ROOT
         shell: bash
         run: |
-          set -euo pipefail
-
-          # ندوّر على ملفات الـ tweak الشائعة
-          HIT="$(find _extract -type f \( -name 'Tweak.xm' -o -name 'Tweak.mm' -o -name 'Tweak.x' \) | head -n 1 || true)"
-
-          if [ -z "${HIT}" ]; then
-            echo "❌ Couldn't find Tweak.xm / Tweak.mm / Tweak.x inside zip."
-            echo "Dumping candidates (mm/xm) up to 30:"
-            find _extract -type f \( -name '*.xm' -o -name '*.mm' \) | head -n 30
+          set -e
+          ROOT=$(find _extract -name Makefile -o -name Tweak.mm -o -name Tweak.xm | head -n 1)
+          if [ -z "$ROOT" ]; then
+            echo "❌ Project root not found"
             exit 1
           fi
+          PROJECT_ROOT=$(dirname "$ROOT")
+          echo "PROJECT_ROOT=$PROJECT_ROOT" >> $GITHUB_ENV
+          echo "PROJECT_ROOT = $PROJECT_ROOT"
 
-          # PROJECT_ROOT = مجلد يحتوي ملف Tweak.* وغالباً بجنبه src/ و deps/
-          PROJECT_ROOT="$(dirname "$HIT")"
-
-          # إذا الملف داخل src/ رجّع خطوة للخلف
-          if [ "$(basename "$PROJECT_ROOT")" = "src" ]; then
-            PROJECT_ROOT="$(dirname "$PROJECT_ROOT")"
-          fi
-
-          echo "✅ Found tweak file: $HIT"
-          echo "✅ PROJECT_ROOT: $PROJECT_ROOT"
-
-          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
-
-      # ------------------------------------------------------------
-      # 3) Ensure deps: KittyMemory + SSZipArchive
-      #   - يصلّح include paths تلقائياً
-      # ------------------------------------------------------------
-      - name: 3) Fix deps (KittyMemory + SSZipArchive) and print exact include dirs
+      # --------------------------------------------------
+      # 3) Setup Theos
+      # --------------------------------------------------
+      - name: Setup Theos
         shell: bash
         run: |
-          set -euo pipefail
-          cd "$PROJECT_ROOT"
-          mkdir -p deps
+          set -e
+          rm -rf $HOME/theos
+          git clone --recursive https://github.com/theos/theos.git $HOME/theos
+          git clone https://github.com/theos/sdks.git $HOME/theos/sdks
+          echo "THEOS=$HOME/theos" >> $GITHUB_ENV
+          echo "$HOME/theos/bin" >> $GITHUB_PATH
+          brew install ldid
 
-          # ---------- KittyMemory ----------
-          KITTY_HDR="$(find .. -type f -name 'KittyInclude.hpp' | head -n 1 || true)"
-          if [ -z "${KITTY_HDR}" ]; then
-            echo "⚠️ KittyInclude.hpp not found -> cloning KittyMemory..."
-            rm -rf deps/KittyMemory
-            git clone --depth=1 https://github.com/MJx0/KittyMemory.git deps/KittyMemory
-            KITTY_HDR="$(find deps/KittyMemory -type f -name 'KittyInclude.hpp' | head -n 1 || true)"
-          fi
-
-          if [ -z "${KITTY_HDR}" ]; then
-            echo "❌ KittyMemory still not found after clone."
-            exit 1
-          fi
-
-          KITTY_INC_DIR="$(dirname "$KITTY_HDR")"
-          echo "✅ KittyInclude.hpp = $KITTY_HDR"
-          echo "✅ KITTY_INC_DIR   = $KITTY_INC_DIR"
-          echo "KITTY_INC_DIR=$KITTY_INC_DIR" >> "$GITHUB_ENV"
-
-          # ---------- SSZipArchive ----------
-          # المستخدم عنده include <SSZipArchive/ZipArchive.h> أو <SSZipArchive/SSZipArchive.h>
-          SS_HDR="$(find .. -type f \( -name 'SSZipArchive.h' -o -name 'ZipArchive.h' \) | head -n 1 || true)"
-          if [ -z "${SS_HDR}" ]; then
-            echo "⚠️ SSZipArchive headers not found -> cloning ZipArchive..."
-            rm -rf deps/ZipArchive
-            git clone --depth=1 https://github.com/ZipArchive/ZipArchive.git deps/ZipArchive
-
-            # غالباً المسار: deps/ZipArchive/Sources/SSZipArchive/SSZipArchive.h
-            SS_HDR="$(find deps/ZipArchive -type f \( -name 'SSZipArchive.h' -o -name 'ZipArchive.h' \) | head -n 1 || true)"
-          fi
-
-          if [ -z "${SS_HDR}" ]; then
-            echo "❌ SSZipArchive not found. (Your code imports SSZipArchive/ZipArchive.h)"
-            exit 1
-          fi
-
-          # include dir لازم يكون الأب اللي يحتوي مجلد SSZipArchive
-          # مثال: .../Sources  بحيث يصير include <SSZipArchive/SSZipArchive.h> صحيح
-          SSZIP_SSZ_DIR="$(dirname "$SS_HDR")"                # .../SSZipArchive
-          SSZIP_PARENT="$(dirname "$SSZIP_SSZ_DIR")"         # .../Sources (أو شيء مشابه)
-          echo "✅ SSZipArchive header = $SS_HDR"
-          echo "✅ SSZIP_INCLUDE_BASE  = $SSZIP_PARENT"
-          echo "SSZIP_INCLUDE_BASE=$SSZIP_PARENT" >> "$GITHUB_ENV"
-
-          echo "📌 Include dirs summary:"
-          echo "  KITTY_INC_DIR      = $KITTY_INC_DIR"
-          echo "  SSZIP_INCLUDE_BASE = $SSZIP_PARENT"
-
-      # ------------------------------------------------------------
-      # 4) Generate NEW Makefile (يحذف القديم) ويجمع كل الملفات الموجودة فعلياً
-      #    - يستثني أمثلة KittyMemory (example-android) وأي مجلدات tests
-      # ------------------------------------------------------------
-      - - name: 4) Delete old Makefile + generate new smart Makefile (SAFE)
+      # --------------------------------------------------
+      # 4) Delete Makefile + Generate SAFE Makefile
+      # --------------------------------------------------
+      - name: Generate Makefile
         shell: bash
         run: |
           set -e
           cd "$PROJECT_ROOT"
-
-          echo "🗑️ Removing old Makefile..."
           rm -f Makefile
 
-          echo "🧠 Generating SAFE Makefile..."
+          echo "Generating Makefile..."
 
-          {
-            echo "TARGET := iphone:clang:latest:14.0"
-            echo "ARCHS := arm64 arm64e"
-            echo "THEOS_PACKAGE_SCHEME := rootless"
-            echo
-            echo "include \$(THEOS)/makefiles/common.mk"
-            echo
-            echo "TWEAK_NAME := UEDumper"
-            echo
-            echo "UEDumper_FILES := \\"
-          } > Makefile
+          echo "TARGET := iphone:clang:latest:14.0" > Makefile
+          echo "ARCHS := arm64 arm64e" >> Makefile
+          echo "THEOS_PACKAGE_SCHEME := rootless" >> Makefile
+          echo "" >> Makefile
+          echo "include \$(THEOS)/makefiles/common.mk" >> Makefile
+          echo "" >> Makefile
+          echo "TWEAK_NAME := UEDumper" >> Makefile
+          echo "" >> Makefile
+          echo "UEDumper_FILES := \\" >> Makefile
 
-          # نضيف الملفات سطر سطر (آمن 100%)
           find . -type f \
-            \( -name '*.xm' -o -name '*.x' -o -name '*.mm' -o -name '*.m' -o -name '*.cpp' -o -name '*.c' \) \
+            \( -name '*.xm' -o -name '*.mm' -o -name '*.m' -o -name '*.cpp' \) \
             -not -path './.theos/*' \
-            -not -path './deps/KittyMemory/example-android/*' \
-            -not -path './deps/KittyMemory/examples/*' \
-            -not -path './deps/ZipArchive/Tests/*' \
-            -not -path './deps/ZipArchive/Example/*' \
             | sed 's|^\./||' \
             | sort \
-            | while read -r f; do
+            | while read f; do
                 echo "  $f \\" >> Makefile
               done
 
-          {
-            echo
-            echo "UEDumper_FRAMEWORKS := UIKit Foundation Security"
-            echo "UEDumper_CFLAGS += -fobjc-arc -Wno-error -Wno-unused-variable -Wno-unused-function"
-            echo "UEDumper_CCFLAGS += -std=c++17"
-            echo
-            echo "include \$(THEOS_MAKE_PATH)/tweak.mk"
-          } >> Makefile
+          echo "" >> Makefile
+          echo "UEDumper_FRAMEWORKS := UIKit Foundation Security" >> Makefile
+          echo "UEDumper_CFLAGS += -fobjc-arc -Wno-error" >> Makefile
+          echo "UEDumper_CCFLAGS += -std=c++17" >> Makefile
+          echo "" >> Makefile
+          echo "include \$(THEOS_MAKE_PATH)/tweak.mk" >> Makefile
 
-          echo "✅ Makefile generated successfully"
-          echo "---- Makefile preview ----"
+          echo "Makefile generated:"
           sed -n '1,120p' Makefile
 
-      # ------------------------------------------------------------
-      # 5) Setup Theos + SDKs (يحذف sdks قبل clone لتجنب 'already exists')
-      # ------------------------------------------------------------
-      - name: 5) Setup Theos (clean) + SDKs
+      # --------------------------------------------------
+      # 5) Build
+      # --------------------------------------------------
+      - name: Build
         shell: bash
         run: |
-          set -euo pipefail
-
-          rm -rf "$HOME/theos"
-          git clone --recursive --depth=1 https://github.com/theos/theos.git "$HOME/theos"
-
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
-
-          # مهم جداً حتى ما يطلع: destination path .../sdks already exists
-          rm -rf "$HOME/theos/sdks"
-          git clone --depth=1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
-
-          # تسريع
-          rm -rf "$HOME/theos/sdks/iPhoneOS"{9..13}.sdk || true
-
-          brew update
-          brew install ldid xz fmt
-
-      # ------------------------------------------------------------
-      # 6) Build (يمرر include/lib paths مباشرة) + يطلع deb + dylib
-      # ------------------------------------------------------------
-      - name: 6) Build package (force include dirs for Kitty + SSZipArchive + fmt)
-        shell: bash
-        run: |
-          set -euo pipefail
+          set -e
           cd "$PROJECT_ROOT"
-
-          # مسارات fmt في macos-latest (Apple Silicon)
-          FMT_PREFIX="$(brew --prefix fmt)"
-          echo "✅ FMT_PREFIX=$FMT_PREFIX"
-
-          # استخدم include dirs اللي طلعناها
-          echo "✅ KITTY_INC_DIR=$KITTY_INC_DIR"
-          echo "✅ SSZIP_INCLUDE_BASE=$SSZIP_INCLUDE_BASE"
-
-          # نمررها كـ flags:
-          export CFLAGS="$CFLAGS -I$KITTY_INC_DIR -I$SSZIP_INCLUDE_BASE -I$FMT_PREFIX/include"
-          export CXXFLAGS="$CXXFLAGS -I$KITTY_INC_DIR -I$SSZIP_INCLUDE_BASE -I$FMT_PREFIX/include"
-          export LDFLAGS="$LDFLAGS -L$FMT_PREFIX/lib -lfmt"
-
           make clean || true
-          make package FINALPACKAGE=1 messages=yes
+          make package
 
-          echo "✅ Build output:"
-          find packages -maxdepth 2 -type f || true
-          find .theos -maxdepth 6 -type f -name '*.dylib' -o -name '*.deb' || true
-
-      # ------------------------------------------------------------
-      # 7) Upload artifacts
-      # ------------------------------------------------------------
-      - name: 7) Upload DEB + dylib (if exists)
+      # --------------------------------------------------
+      # 6) Upload result
+      # --------------------------------------------------
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build_output
+          name: UEDumper-output
           path: |
             ${{ env.PROJECT_ROOT }}/packages/*.deb
             ${{ env.PROJECT_ROOT }}/.theos/obj/**/*.dylib
-            ${{ env.PROJECT_ROOT }}/.theos/obj/*.dylib
